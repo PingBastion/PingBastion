@@ -1,0 +1,68 @@
+[all]
+# Minimal‑power config for Raspberry Pi 4 (arm64)
+
+arm_64bit=1
+kernel=vmlinuz
+cmdline=cmdline.txt
+initramfs initrd.img followkernel
+
+# ────────── Global power‑saving & undervolting ──────────
+
+# Skip the rainbow splash screen to boot slightly faster.
+disable_splash=1
+
+# CPU/GPU voltage and frequency tuning.
+over_voltage_delta=-140000           # Undervolt by 60 mV (safe range −16…8)
+arm_freq=1000           # Maximum CPU frequency 1 GHz
+arm_freq_min=300          # Minimum CPU frequency 300 MHz
+force_turbo=0             # Allow governor to scale between min & max
+
+# Allocate the smallest possible chunk of RAM to the GPU.
+gpu_mem=16
+
+# ────────── Disable unused peripherals ──────────
+
+# On‑board interfaces
+ dtparam=audio=off
+ dtparam=i2c_arm=off
+ dtparam=spi=off
+ enable_uart=0
+
+# Auto‑detection features
+ camera_auto_detect=0
+ display_auto_detect=1
+
+# Status LEDs (optional but saves a few mW)
+ dtparam=act_led_trigger=none
+ dtparam=act_led_activelow=off
+ dtparam=pwr_led_trigger=none
+ dtparam=pwr_led_activelow=off
+
+# ────────── Optional overlays ──────────
+
+# Disable wireless interfaces entirely.
+dtoverlay=disable-bt      # Bluetooth
+dtoverlay=disable-wifi    # Wi‑Fi
+
+# Leave the 3‑D GPU disabled unless explicitly needed.
+#dtoverlay=vc4-kms-v3d
+
+# ────────── Video interfaces ──────────
+
+# Power down HDMI when no monitor is attached.
+hdmi_ignore_hotplug=0
+
+# Ensure HDMI PHY powers down when the screen blanks.
+hdmi_blanking=2
+
+disable_overscan=1        # No overscan compensation
+
+# ────────── Model‑specific tweaks ──────────
+
+[pi4]
+max_framebuffers=1         # Only one framebuffer in use
+arm_boost=0               # Disable automatic turbo boost
+
+
+
+

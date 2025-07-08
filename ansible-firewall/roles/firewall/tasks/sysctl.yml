@@ -1,0 +1,14 @@
+---
+# Enables IP forwarding (IPv4 & IPv6) and makes the settings persistent.
+
+- name: Ensure IPv4/IPv6 forwarding is enabled and persistent
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+    sysctl_file: /etc/sysctl.d/99-firewall.conf   # survives reboot
+  loop:
+    - { name: 'net.ipv4.ip_forward',              value: '1' }
+    - { name: 'net.ipv6.conf.all.forwarding',     value: '1' }
+    - { name: 'net.ipv6.conf.default.forwarding', value: '1' }

@@ -1,0 +1,8 @@
+---
+- name: Run initial setup and firewall configuration
+  hosts: all
+  become: yes
+
+  roles:
+    - role: first_setup
+

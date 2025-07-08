@@ -1,0 +1,97 @@
+#!/usr/sbin/nft -f
+flush ruleset
+
+# ── interface shortcuts ─────────────────────────────────────────────────────
+define LAN      = "{{ firewall_cfg.interfaces.lan.nic }}";
+define WAN      = "{{ firewall_cfg.interfaces.wan.nic }}";
+define LAN_NET  = "{{ firewall_cfg.interfaces.lan.cidr }}";
+
+# ── filter table ────────────────────────────────────────────────────────────
+table inet filter {
+
+  chain input {
+    type filter hook input priority 0;
+    policy {{ firewall_cfg.policy.input }};
+    ct state established,related accept;
+
+{% for r in firewall_cfg.rules if r.chain == 'input' %}
+    {% include 'rule_line.j2' %}
+{% endfor %}
+  }
+
+  chain forward {
+    type filter hook forward priority 0;
+    policy {{ firewall_cfg.policy.forward }};
+    ct state established,related accept;
+
+{% if firewall_cfg.nat %}
+    # Allow LAN → WAN traffic so masquerading works
+    iifname $LAN oifname $WAN accept;
+{% endif %}
+
+{% for r in firewall_cfg.rules if r.chain == 'forward' %}
+    {% include 'rule_line.j2' %}
+{% endfor %}
+  }
+
+  chain output {
+    type filter hook output priority 0;
+    policy {{ firewall_cfg.policy.output }};
+  }
+}
+
+# ── NAT table ───────────────────────────────────────────────────────────────
+{% if firewall_cfg.nat %}
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority 100;
+    oifname $WAN masquerade;
+  }
+}
+{% endif %}
+
+# ── DSCP marking / mangle table ─────────────────────────────────────────────
+{% macro sanitize(name) -%}
+  {{- name | replace(':','_') | replace('-','_') | replace('.','_') -}}
+{%- endmacro %}
+
+{% macro ports(p) -%}
+  { {%- if p is string -%}{{ p }}{%- else -%}{{ p | join(', ') }}{%- endif -%} }
+{%- endmacro %}
+
+{% if firewall_cfg.dscp_classes %}
+table inet mangle {
+
+  # ── Netify dynamic IP sets (empty declarations so nft -c passes) ──────────
+{% set ns_names = [] %}
+{% for cls in firewall_cfg.dscp_classes.values() %}
+{%   for ns in (cls.match.netify_sets | default([])) %}
+{%     set _ = ns_names.append(sanitize(ns)) %}
+{%   endfor %}
+{% endfor %}
+{% for ns in ns_names | unique %}
+  set {{ ns }} { type ipv4_addr; }
+{% endfor %}
+
+  chain prerouting {
+    type filter hook prerouting priority -300;    # before conntrack
+{% for name, cls in firewall_cfg.dscp_classes.items() %}
+{%   set mark = cls.dscp | default('cs0') %}
+{%   if cls.match.netify_sets is defined %}
+{%     for ns in cls.match.netify_sets %}
+    ip saddr @{{ sanitize(ns) }} ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} netify-saddr";
+{%     endfor %}
+{%   endif %}
+{%   if cls.match is defined and cls.match.udp_ports is defined %}
+    ip protocol udp udp dport {{ ports(cls.match.udp_ports) }} ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} udp-d";
+    ip protocol udp udp sport {{ ports(cls.match.udp_ports) }} ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} udp-s";
+{%   endif %}
+{%   if cls.match is defined and cls.match.tcp_ports is defined %}
+    ip protocol tcp tcp dport {{ ports(cls.match.tcp_ports) }} ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} tcp-d";
+    ip protocol tcp tcp sport {{ ports(cls.match.tcp_ports) }} ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} tcp-s";
+{%   endif %}
+{% endfor %}
+    ip dscp cs0 counter comment "default best-effort";
+  }
+}
+{% endif %}

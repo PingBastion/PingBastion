@@ -1,0 +1,23 @@
+# bootstrap.yml ─ run FIRST from the controller
+# Ensures we can log in with a password before the real playbook starts.
+
+- name: Controller prerequisites
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Set known_hosts file path fact
+      ansible.builtin.set_fact:
+        known_hosts_file: "{{ playbook_dir }}/known_hosts"
+
+    - name: Install sshpass so Ansible can use password auth
+      ansible.builtin.package:
+        name: sshpass
+        state: present
+
+    - name: Pre-populate controller known_hosts
+      ansible.builtin.known_hosts:
+        path: "{{ known_hosts_file }}"
+        name: "{{ item }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan -t ed25519 ' + item) }}"
+      loop: "{{ groups['all'] }}"

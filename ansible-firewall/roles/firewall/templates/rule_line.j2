@@ -1,0 +1,40 @@
+{# ------------------------------------------------------------------------- #
+ #  rule_line.j2 – expands one firewall_cfg.rules item “r” into a rule line  #
+ #  Assumptions                                                             #
+ #    • $LAN and $WAN interface aliases are defined in the parent template  #
+ #    • The variable “r” (a dict) is in scope                                #
+ # ------------------------------------------------------------------------- #}
+
+{%- macro iface_alias(dir) -%}
+  {%- if dir == 'lan' -%}$LAN
+  {%- elif dir == 'wan' -%}$WAN
+  {%- else -%}"{{ dir }}"
+  {%- endif -%}
+{%- endmacro %}
+
+{# ---- collect the rule tokens in order ---------------------------------- #}
+{%- set parts = [] -%}
+
+{# Match on ingress / egress interface #}
+{% if r.from is defined %}
+  {% set _ = parts.append('iifname ' ~ iface_alias(r.from)) %}
+{% endif %}
+{% if r.to is defined %}
+  {% set _ = parts.append('oifname ' ~ iface_alias(r.to)) %}
+{% endif %}
+
+{# Protocol (ip v4/v6 is implied by table family) #}
+{% if r.proto is defined %}
+  {% set _ = parts.append('ip protocol ' ~ r.proto) %}
+{% endif %}
+
+{# L4 ports – default to tcp when proto missing but a port is given #}
+{% if r.sport is defined %}
+  {% set _ = parts.append((r.proto | default('tcp')) ~ ' sport ' ~ r.sport) %}
+{% endif %}
+{% if r.dport is defined %}
+  {% set _ = parts.append((r.proto | default('tcp')) ~ ' dport ' ~ r.dport) %}
+{% endif %}
+
+{# ---- emit the assembled rule ------------------------------------------- #}
+{{ parts | join(' ') }} {{ r.action }}{% if r.comment %} comment "{{ r.comment }}"{% endif %};

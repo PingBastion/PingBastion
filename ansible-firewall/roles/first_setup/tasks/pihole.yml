@@ -1,0 +1,152 @@
+# roles/pihole/tasks/main.yaml
+- name: Create pihole group & user (matches what installer would do)
+  group: { name: pihole }
+- user:
+    name: pihole
+    group: pihole
+    home: /home/pihole
+    shell: /usr/sbin/nologin
+    password: '*'
+
+- name: Ensure /etc/pihole directory exists
+  file:
+    path: /etc/pihole
+    state: directory
+    owner: pihole        # or “root” if the pihole user hasn’t been created yet
+    group: pihole        # same note as above
+    mode: "0755"
+  become: yes    
+
+
+- name: Copy custom host files
+  copy:
+    src: files/{{ pihole_config_dir}}/custom.list         # wherever you keep your template
+    dest: /etc/pihole/custom.list
+    owner: pihole
+    group: pihole
+    mode: '0644'
+  when: pihole_host_custom_list is defined or pihole_config_dir is defined
+ 
+- name: Pihole base config file 
+  template:
+    src: pihole.toml.j2
+    dest: /etc/pihole/pihole.toml
+    owner: pihole
+    group: pihole
+    mode: '0644'
+
+- name: Finish any stray dpkg transactions
+  become: yes
+  shell: |
+    dpkg --configure -a
+    apt-get --fix-broken -y install
+  changed_when: false
+  when: not birdwall_installed.stat.exists or update_pihole is defined
+
+- name: Wait until other apt users are gone
+  become: yes
+  shell: |
+    while lsof /var/lib/dpkg/lock-frontend; do sleep 5; done
+  changed_when: false
+  when: not birdwall_installed.stat.exists or update_pihole is defined
+
+- name: Guarantee Pi-hole prerequisites exist
+  become: yes
+  apt:
+    name:
+      - sqlite3
+      - curl
+      - procps
+      - ca-certificates
+      - lsb-release
+      - dnsutils
+      - iproute2
+    state: present
+    update_cache: yes
+  when: not birdwall_installed.stat.exists or update_pihole is defined
+
+- name: Stop and disable systemd-resolved
+  systemd:
+    name: systemd-resolved
+    state: stopped
+    enabled: no
+  become: yes
+  when: not birdwall_installed.stat.exists or update_pihole is defined
+
+- name: Remove the resolv.conf symlink created by resolved
+  file:
+    path: /etc/resolv.conf
+    state: absent
+    force: yes
+  become: yes
+  when: not birdwall_installed.stat.exists or update_pihole is defined
+
+- name: Create static /etc/resolv.conf that points to Pi-hole (or fallback DNS)
+  copy:
+    dest: /etc/resolv.conf
+    content: |
+      # fallback while Pi-hole starts; comment out later if you like
+      nameserver 1.1.1.1
+      options edns0
+    owner: root
+    group: root
+    mode: '0644'
+  become: yes
+  when: not birdwall_installed.stat.exists or update_pihole is defined
+# tasks/build_seed_file.yml+
+- name: Create /etc/pihole/seed_adlists.sql from pihole.adlist list
+  ansible.builtin.copy:
+    dest: /etc/pihole/seed_adlists.sql          # adjust path if you mount a volume
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {%- for url in pihole.adlist | default([]) %}
+      INSERT OR IGNORE INTO adlist (address) VALUES ('{{ url }}');
+      {%- endfor %}
+
+- name: Import ad-lists with sqlite3 CLI
+  ansible.builtin.command:
+    argv:
+      - sqlite3
+      - /etc/pihole/gravity.db
+      - ".read /etc/pihole/seed_adlists.sql"
+      - "SELECT total_changes();"
+  register: seed_result
+  changed_when: (seed_result.stdout | trim | int) > 0
+
+
+- name: Install Pi-hole unattended and capture output
+  become: yes
+  shell: |
+    set -o pipefail
+    curl -sSL https://install.pi-hole.net |
+      bash -s -- --unattended 2>&1 | tee /tmp/pihole.log
+  args:
+    executable: /bin/bash
+  register: pihole_run
+  failed_when: >
+    (pihole_run.rc != 0) and
+    ('Pi-hole blocking is enabled' not in pihole_run.stdout)
+  when: not birdwall_installed.stat.exists or update_pihole is defined
+
+
+- name: Confirm Pi-hole is running
+  become: yes
+  command: pihole status web
+  register: pihole_status
+  changed_when: false
+  failed_when: "'53' not in pihole_status.stdout"
+
+- name: Restart pihole ftl
+  systemd:
+    name: pihole-FTL.service
+    enabled: true
+    state: restarted
+  ignore_errors: yes
+
+- name: Update gravity lists
+  command: pihole -g
+  become: yes
+
+

@@ -1,0 +1,34 @@
+- name: Deploy persistent QoS setup script
+  template:
+    src: qos-setup.sh.j2
+    dest: /usr/local/bin/qos-setup.sh
+    mode: '0755'
+
+
+
+
+- name: Install systemd service to run QoS setup on boot
+  copy:
+    dest: /etc/systemd/system/qos-restore.service
+    content: |
+      [Unit]
+      Description=Restore Cake QoS and IFB config
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/qos-setup.sh
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Reload systemd to register new service
+  command: systemctl daemon-reload
+
+- name: Enable and start qos-restore service
+  systemd:
+    name: qos-restore.service
+    enabled: true
+    state: restarted
+  ignore_errors: yes
