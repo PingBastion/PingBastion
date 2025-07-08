@@ -41,14 +41,14 @@
     dpkg --configure -a
     apt-get --fix-broken -y install
   changed_when: false
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 - name: Wait until other apt users are gone
   become: yes
   shell: |
     while lsof /var/lib/dpkg/lock-frontend; do sleep 5; done
   changed_when: false
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 - name: Guarantee Pi-hole prerequisites exist
   become: yes
@@ -63,7 +63,7 @@
       - iproute2
     state: present
     update_cache: yes
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 - name: Stop and disable systemd-resolved
   systemd:
@@ -71,7 +71,7 @@
     state: stopped
     enabled: no
   become: yes
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 - name: Remove the resolv.conf symlink created by resolved
   file:
@@ -79,7 +79,7 @@
     state: absent
     force: yes
   become: yes
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 - name: Create static /etc/resolv.conf that points to Pi-hole (or fallback DNS)
   copy:
@@ -92,7 +92,7 @@
     group: root
     mode: '0644'
   become: yes
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 # tasks/build_seed_file.yml+
 - name: Create /etc/pihole/seed_adlists.sql from pihole.adlist list
   ansible.builtin.copy:
@@ -128,7 +128,7 @@
   failed_when: >
     (pihole_run.rc != 0) and
     ('Pi-hole blocking is enabled' not in pihole_run.stdout)
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 
 - name: Confirm Pi-hole is running

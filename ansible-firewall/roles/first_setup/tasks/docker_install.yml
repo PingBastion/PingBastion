@@ -8,7 +8,7 @@
       - lsb-release
     state: present
     update_cache: yes
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 - name: Add Docker’s official GPG key
   ansible.builtin.shell: |
@@ -17,7 +17,7 @@
       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   args:
     creates: /etc/apt/keyrings/docker.gpg
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 # Detect whether the target is x86-64 or 64-bit ARM
 # tasks/set_arch.yml
@@ -28,7 +28,7 @@
                     ['aarch64', 'arm64', 'armv8', 'armv8l']
         else 'amd64'
       ) | trim }}"
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 
 
@@ -40,7 +40,7 @@ https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
     filename: docker
     state: present
     update_cache: yes
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 
 - name: Install Docker engine & Compose plugin
@@ -55,27 +55,27 @@ https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
       - python3-docker 
     state: present
     update_cache: yes
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
   
 - name: Ensure docker service is started
   service:
     name: docker
     state: started
     enabled: yes
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
       
 
 - name: Ensure docker group exists
   group:
     name: docker
     state: present
-  when: not birdwall_installed.stat.exists or update_pihole is defined
+  when: not pingbastion_installed.stat.exists or update_pihole is defined
 
 - name: Add {{ docker_run_user }} to docker group
   user:
     name: "{{ docker_run_user }}"
     groups: docker
     append: yes
-  when: docker_run_user != 'root' and ( not birdwall_installed.stat.exists or update_pihole is defined )
+  when: docker_run_user != 'root' and ( not pingbastion_installed.stat.exists or update_pihole is defined )
     
 
