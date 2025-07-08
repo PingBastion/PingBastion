@@ -1,0 +1,17 @@
+---
+- name: Install BirdWall ASCII banner for console logins
+  copy:
+    src: banner
+    dest: /etc/issue
+    mode: '0644'
+  become: yes
+  when: not birdwall_installed.stat.exists
+
+- name: Show the same banner to SSH users
+  copy:
+    src: /etc/issue
+    dest: /etc/issue.net
+    remote_src: yes
+    mode: '0644'
+  become: yes
+  when: not birdwall_installed.stat.exists

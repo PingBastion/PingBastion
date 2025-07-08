@@ -1,0 +1,22 @@
+---
+# All handlers consolidated & deduplicated
+
+- name: enable_nftables            # <- exact match for notify
+  ansible.builtin.systemd:
+    name: nftables
+    state: restarted
+    enabled: yes                   # make it start at boot
+
+- name: Apply netplan              # still used by netplan.yml
+  ansible.builtin.command: netplan apply
+  when: ansible_virtualization_role != "guest"
+
+- name: Reload nftables            # template re-parsed without restart
+  ansible.builtin.command: nft -f /etc/nftables.conf
+  become: yes
+
+  ###########################################################################
+# Flush handlers *now* (they run asynchronously) then exit the play safely
+###########################################################################
+- meta: flush_handlers        # kicks off apply_netplan & enable_nftables
+- meta: end_play     

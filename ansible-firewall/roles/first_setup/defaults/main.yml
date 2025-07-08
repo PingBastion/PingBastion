@@ -1,0 +1,19 @@
+# ---------- Pi-hole settings ----------
+pihole_timezone: "Europe/Rome"
+pihole_webpassword: "changeme"     # override via vault
+pihole_image: "pihole/pihole:latest"
+# --- new knob ---------------------------------------------------------------
+docker_run_user: "{{ ansible_user | default('ubuntu') }}"
+# ---------------------------------------------------------------------------
+
+# Enable DHCP (container must run in host mode)
+pihole_dhcp_active: true           # set false if you ever switch it off
+
+# Paths
+pihole_project_dir: "/opt/pihole"
+pihole_compose_src: "pihole_compose.yml.j2"
+pihole_toml_src: "pihole.toml"     # expected in role files/ or play dir
+pihole_toml_dest: "{{ pihole_project_dir }}/pihole.toml"
+
+# Docker CE version channel (leave empty for latest)
+docker_package_channel: "stable"

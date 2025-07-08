@@ -1,0 +1,21 @@
+version: "3.9"
+services:
+  pihole:
+    image: "{{ pihole_image }}"
+    container_name: pihole
+    hostname: pihole
+    restart: always
+    network_mode: host        # DHCP & DNS need raw access
+    cap_add:
+      - NET_ADMIN
+    environment:
+      TZ: "{{ pihole_timezone }}"
+      WEBPASSWORD: "{{ pihole_webpassword }}"
+      DHCP_ACTIVE: "{{ 'true' if pihole_dhcp_active else 'false' }}"
+    volumes:
+      - "{{ pihole_project_dir }}/etc-pihole:/etc/pihole"
+      - "{{ pihole_project_dir }}/etc-dnsmasq.d:/etc/dnsmasq.d"
+      - "{{ pihole_toml_dest }}:/etc/pihole/pihole.toml"
+    dns:
+      - 127.0.0.1
+      - 1.1.1.1

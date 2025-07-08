@@ -1,0 +1,6 @@
+
+- name: Configure firewall
+  hosts: all
+  roles:
+    - firewall
+    #- ndpi

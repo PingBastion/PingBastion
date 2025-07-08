@@ -1,0 +1,84 @@
+
+
+---
+- name: Ensure the default user exists
+  user:
+    name: "{{ default_user }}"
+    password: "{{ default_user_password }}"
+    shell: /bin/bash
+    groups: sudo
+    append: yes
+    state: present
+    create_home: yes
+
+
+- name: Check if birdwall_installed marker file exists
+  stat:
+    path: /etc/birdwall_installed
+  register: birdwall_installed
+
+- name: Update APT package list
+  apt:
+    update_cache: yes
+  when: not birdwall_installed.stat.exists
+
+- name: Copy power-optimized RPI config.txt if required
+  copy:
+    src: config.txt
+    dest: "/boot/firmware/config.txt"
+    owner: root
+    group: root
+    mode: "0644"
+  when: not birdwall_installed.stat.exists and is_raspberry is defined
+
+- name: Perform full system upgrade
+  apt:
+    upgrade: full
+  when: not birdwall_installed.stat.exists
+
+- name: Ensure required packages are installed
+  apt:
+    name:
+      - netplan.io
+      - nftables
+      - htop
+      - iotop
+      - sqlite3 
+    state: present
+  when: not birdwall_installed.stat.exists
+- name: Ensure required packages are removed
+  apt:
+    name:
+      - cloud-init
+    state: absent
+  when: not birdwall_installed.stat.exists
+
+- name: Always assign the correct name to the thetering interface
+  template:
+    src: udev.rules.j2
+    dest: /etc/udev/rules.d/50-usb-tether.rules
+    mode: '0755'
+  when: not birdwall_installed.stat.exists
+
+- name: Reload udev rules
+  command: udevadm control --reload
+  when: not birdwall_installed.stat.exists
+
+- name: Trigger udev rules
+  command: udevadm trigger
+  when: not birdwall_installed.stat.exists
+  
+  
+- import_tasks: docker_install.yml
+- import_tasks: pihole.yml
+- import_tasks: banner.yml
+
+- name: Create birdwall_installed marker file
+  file:
+    path: /etc/birdwall_installed
+    state: touch
+    mode: '0644'
+  when: not birdwall_installed.stat.exists
+
+
+

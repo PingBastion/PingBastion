@@ -1,0 +1,145 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  group_vars/firewall.yml           ← single source of truth
+# ─────────────────────────────────────────────────────────────────────────────
+default_user: anvia
+default_user_password: train
+pihole_config_dir: pihole_main
+pihole_host_custom_list: yes
+
+firewall_cfg:
+
+  ##########################################################################
+  # 1 ▸ INTERFACES & ADDRESSING
+  ##########################################################################
+  interfaces:
+    lan:
+      nic: &lan_if "enp6s19" #EXAMPLE- USE YOUR NIC NAME FROM UBUNTU INSTALLATION
+      cidr: "172.16.0.1/24" #EXAMPLE- USE THE IP/SUBNET COMBO YOU WANT FOR YOUR LAN
+
+    wan:
+      nic: &wan_if "usb1" #DEFINE HERE THE IFNAME. ALL RNDIS AND CDC ETHERNET DEVICES WILL DEFAULT TO THIS NAME, ALL QOS AND NFTABLES RULES ADJUSTED AUTOMATICALLY
+      method: "dhcp" # DHCP IS USED HERE CAUSE I'M DOING TETHERING/GETTING INTERNET FROM ANOTHER SOURCE/CABLE. EDIT AS NEEDED
+  dhcp:
+    local_domain: marano.loc
+    range:
+      start: 172.16.0.100
+      end: 172.16.0.251
+    gateway: 172.16.0.1
+    dns: 172.16.0.16
+  
+  ##########################################################################
+  # 2 ▸ NETWORK ADDRESS TRANSLATION
+  ##########################################################################
+  nat: true                                   # masquerade LAN → WAN
+
+  ##########################################################################
+  # 3 ▸ DEFAULT POLICY (per nftables base chains)
+  ##########################################################################
+  policy:
+    input:   drop
+    forward: drop
+    output:  accept
+
+  ##########################################################################
+  # 4 ▸ SIMPLE ALLOW/DENY RULES  (ordered; most specific first)
+  ##########################################################################
+  rules:
+    - chain: input
+      from:  lan
+      action: accept
+      comment: "Allow LAN traffic to reach the firewall"
+
+    - chain: input
+      proto: icmp
+      action: accept
+      comment: "Allow ping"
+
+    - chain: forward
+      from: lan
+      to:   wan
+      action: accept
+      comment: "Permit LAN → WAN forwarding"
+
+  ##########################################################################
+  # 5 ▸ DSCP CLASSES   (high-level notation → nft mangle rules)
+  ##########################################################################
+
+  dscp_classes:
+
+    # ── Highest-priority control traffic ───────────────────────────────────
+    ack_small:
+      mark: ef
+      match:
+        protocol: tcp
+        flags: ack          # pure ACKs
+        length_lt: 128
+
+    ping:
+      mark: ef
+      match:
+        protocol: icmp
+        icmp_types: [echo-request, echo-reply]
+
+    udp_short:
+      mark: ef
+      match:
+        protocol: udp
+        length_lt: 1024     # sub-1 kB control frames
+
+    # ── Application classes ────────────────────────────────────────────────
+    dns:
+      mark: cs5
+      match:
+        udp_ports: [53]
+        tcp_ports: [53]
+
+    https:
+      mark: af33
+      match:
+        tcp_ports: [443]
+
+    http:
+      mark: af31
+      match:
+        tcp_ports: [80]
+
+    torrent:
+      mark: cs1
+      match:
+        tcp_ports: "6881-6999,51413,6969"
+        udp_ports: "6881-6999,51413,6969"
+
+    large_flows:
+      mark: af13
+      match:
+        ct_bytes_ge: 5000000   # ≥ 5 MB in one direction
+
+
+  ##########################################################################
+  # 6 ▸ CAKE  (per-interface shaping)
+  ##########################################################################
+  cake:
+    enabled: true
+
+    wan:
+      nic: *wan_if
+      # ifb will default to “ifb_<nic>” in the task file
+      download: 100mbit              # ingress  (WAN→LAN)
+      upload:   10mbit              # egress   (LAN→WAN)
+      rtt: 5ms
+      overhead: 44
+      mpu: 96
+      diffserv: diffserv8
+      extra_opts: " nowash triple-isolate nat ack-filter-aggressive split-gso "
+
+    lan:
+      rtt: 5ms
+      overhead: 44
+      mpu: 96    
+      nic: *lan_if
+      download: 1gbit
+      upload:   1gbit
+      diffserv: diffserv8
+      extra_opts: " split-gso "
+
+

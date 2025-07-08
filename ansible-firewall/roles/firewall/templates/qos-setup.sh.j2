@@ -1,0 +1,96 @@
+#!/bin/bash
+#
+# cake-shaper.sh — Reset all qdiscs/IFBs, then apply CAKE shaping
+#
+# Requires Jinja2 variables:
+#   firewall_cfg.cake.wan.*
+#   firewall_cfg.cake.lan.*
+#
+# ────────────────────────────────────────────────────────────────────────────
+
+set -euo pipefail
+
+{% set wan = firewall_cfg.cake.wan %}
+{% set lan = firewall_cfg.cake.lan %}
+
+# ── Interface names ────────────────────────────────────────────────────────
+WAN="{{ wan.nic }}"
+LAN="{{ lan.nic }}"
+
+# IFB names (15-char limit: "ifb_" + 11 chars of NIC)
+IFB_WAN="ifb_{{ wan.nic[:11] }}"
+IFB_LAN="ifb_{{ lan.nic[:11] }}"
+
+# ── 1. GLOBAL CLEAN-UP STEP ────────────────────────────────────────────────
+cleanup() {
+    echo "► Cleaning up existing qdiscs and IFB devices…"
+
+    # Delete any IFB devices already present
+    mapfile -t _ifbs < <(ip -o link show type ifb | awk -F': ' '{print $2}')
+    for d in "${_ifbs[@]}"; do
+        ip link set dev "$d" down   2>/dev/null || true
+        ip link delete "$d" type ifb 2>/dev/null || true
+        echo "  • Removed IFB $d"
+    done
+
+    # Flush qdiscs (root + ingress) on every interface in /sys/class/net
+    for dev in $(ls /sys/class/net); do
+        tc qdisc del dev "$dev" root    2>/dev/null || true
+        tc qdisc del dev "$dev" ingress 2>/dev/null || true
+    done
+    echo "✓ All qdiscs reset; IFBs removed."
+}
+cleanup
+
+# ── 2. CREATE IFBs ─────────────────────────────────────────────────────────
+modprobe ifb 2>/dev/null || true
+
+for ifb in "$IFB_WAN" "$IFB_LAN"; do
+    ip link add "$ifb" type ifb 2>/dev/null || true
+    ip link set dev "$ifb" up
+done
+
+# ── 3. HELPERS ─────────────────────────────────────────────────────────────
+flush_qdisc() {
+    local DEV="$1"
+    tc qdisc del dev "$DEV" root    2>/dev/null || true
+    tc qdisc del dev "$DEV" ingress 2>/dev/null || true
+}
+
+# ── 4. WAN CONFIG ──────────────────────────────────────────────────────────
+flush_qdisc "$WAN"
+
+# WAN upload (egress)
+tc qdisc add dev "$WAN" root cake \
+    bandwidth {{ wan.upload }} {{ wan.diffserv }} {{ wan.extra_opts }} \
+    rtt {{ wan.rtt }} overhead {{ wan.overhead }} mpu {{ wan.mpu }}
+
+# WAN download (ingress → IFB_WAN)
+tc qdisc add dev "$WAN" ingress
+tc filter add dev "$WAN" ingress matchall action mirred egress redirect dev "$IFB_WAN"
+
+tc qdisc add dev "$IFB_WAN" root cake \
+    bandwidth {{ wan.download }} {{ wan.diffserv }} {{ wan.extra_opts }} \
+    rtt {{ wan.rtt }} overhead {{ wan.overhead }} mpu {{ wan.mpu }}
+
+# ── 5. LAN CONFIG ──────────────────────────────────────────────────────────
+flush_qdisc "$LAN"
+
+# LAN upload (LAN → WAN)
+tc qdisc add dev "$LAN" root cake \
+    bandwidth {{ lan.upload }} {{ lan.diffserv }} {{ lan.extra_opts }}
+
+# LAN download (ingress → IFB_LAN)
+tc qdisc add dev "$LAN" ingress
+tc filter add dev "$LAN" ingress matchall action mirred egress redirect dev "$IFB_LAN"
+
+tc qdisc add dev "$IFB_LAN" root cake \
+    bandwidth {{ lan.download }} {{ lan.diffserv }} {{ lan.extra_opts }}
+
+# ── 6. STATUS ──────────────────────────────────────────────────────────────
+echo
+echo "CAKE shaping applied. Current qdisc state:"
+for d in "$WAN" "$LAN" "$IFB_WAN" "$IFB_LAN"; do
+    echo "── $d ─────────────────────────────────────────"
+    tc -s qdisc show dev "$d"
+done

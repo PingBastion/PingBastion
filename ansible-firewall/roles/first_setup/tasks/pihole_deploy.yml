@@ -1,0 +1,63 @@
+---
+
+# i'll leave it here if any of you wants to mess with Docker pihole
+- name: Create project directory
+  file:
+    path: "{{ pihole_project_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Copy docker-compose template
+  template:
+    src: "{{ pihole_compose_src }}"
+    dest: "{{ pihole_project_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart pihole
+
+- name: Copy pre-existing pihole.toml
+  copy:
+    src: pihole.toml
+    dest: "{{ pihole_toml_dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart pihole
+# tasks/disable_resolved.yml
+- name: Stop and disable systemd-resolved
+  systemd:
+    name: systemd-resolved
+    state: stopped
+    enabled: no
+  become: yes
+
+- name: Remove the resolv.conf symlink created by resolved
+  file:
+    path: /etc/resolv.conf
+    state: absent
+    force: yes
+  become: yes
+
+- name: Create static /etc/resolv.conf that points to Pi-hole (or fallback DNS)
+  copy:
+    dest: /etc/resolv.conf
+    content: |
+      nameserver 127.0.0.1
+      # fallback while Pi-hole starts; comment out later if you like
+      nameserver 1.1.1.1
+      options edns0
+    owner: root
+    group: root
+    mode: '0644'
+  become: yes
+
+# pull image & start (initial run)
+- name: Pull image & start stack
+  community.docker.docker_compose:
+    project_src: "{{ pihole_project_dir }}"
+    state: present
+    pull: yes
+  become_user: "{{ docker_run_user }}"     
