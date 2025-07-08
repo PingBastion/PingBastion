@@ -1,90 +1,85 @@
+# PingBastion
 
-██████╗ ██╗███╗   ██╗ ██████╗ ██████╗  █████╗ ███████╗████████╗██╗ ██████╗ ███╗   ██╗
-██╔══██╗██║████╗  ██║██╔════╝ ██╔══██╗██╔══██╗██╔════╝╚══██╔══╝██║██╔═══██╗████╗  ██║
-██████╔╝██║██╔██╗ ██║██║  ███╗██████╔╝███████║███████╗   ██║   ██║██║   ██║██╔██╗ ██║
-██╔═══╝ ██║██║╚██╗██║██║   ██║██╔══██╗██╔══██║╚════██║   ██║   ██║██║   ██║██║╚██╗██║
-██║     ██║██║ ╚████║╚██████╔╝██████╔╝██║  ██║███████║   ██║   ██║╚██████╔╝██║ ╚████║
-╚═╝     ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
-                                                                                     
+PingBastion turns a vanilla Ubuntu system into a firewall appliance with an
+emphasis on **smooth gaming**.  The included playbooks configure
+nftables-based filtering, Netplan interface definitions, Docker & Pi‑hole and a
+CAKE QoS setup optimised for low latency.
 
+The repository contains everything needed to bootstrap a fresh machine and keep
+the configuration reproducible.  All logic lives inside Ansible roles so it can
+be applied over and over again without manual tweaking.
 
-## Introduction
+## Why “smooth gaming”?
 
-This repository provides an automated solution for setting up and configure a gaming  firewall with advanced configurations using Ansible. It allows administrators to deploy, manage, and maintain consistent firewall rules and settings across multiple Linux-based hosts, utilizing Ansible's powerful automation capabilities.
+Lag spikes ruin online games.  PingBastion applies
+[CAKE](https://www.bufferbloat.net/projects/codel/wiki/Cake/) traffic shaping on
+both the WAN and LAN interfaces to curb bufferbloat and prioritise small control
+packets.  Values for bandwidth, RTT and DSCP mappings are defined in
+`group_vars/` so they are easy to tune for your own connection speed.
 
-### Repository Structure
+## Repository layout
 
-* `generate.sh`: Helper script for initiating configuration.
-* `ansible-firewall/`: Directory containing Ansible playbooks and roles.
+- `generate.sh` – bootstrap script that creates an empty project layout.
+- `ansible-firewall/`
+  - `bootstrap.yml` – controller setup (installs `sshpass`, populates
+    `known_hosts`).
+  - `setup.yml` – initial package install, Docker engine and Pi‑hole deployment.
+  - `firewall.yml` – applies nftables rules, Netplan configuration and QoS.
+  - `diag_firewall.sh` – connectivity diagnostics to run on the target host.
+  - `group_vars/` – example variables for firewall rules and CAKE settings.
+  - `inventory/` – sample hosts file.
+  - `roles/` – implementation of the `first_setup` and `firewall` roles.
 
-  * `bootstrap.yml`: Initializes the environment and installs necessary prerequisites.
-  * `requirements.yml' : Installs Ansible Galaxy/Collections requirements
-  * `setup.yml' : Initial Ubuntu vm setup,package install, Pihole install, then can be used to update floating settingsd(as an example, Pihole setting files/dhcp settings and adlist)
-  * `firewall.yml' : Sets up and updates firewall, QoS and interfaces configuaration
-  * `diag_firewall.sh`: Script for diagnosing firewall settings and issues.
-  * `group_vars/`: Contains group-specific variables.
-  * `inventory/hosts`: Inventory file listing managed hosts.
-  * `roles/firewall`: Role for firewall-specific tasks and configurations.
+## How to use
 
+1. Clone the repository and install dependencies:
+   ```bash
+   git clone <repository_url>
+   cd PingBastion/ansible-firewall
+   ansible-galaxy install -r requirements.yml
+   ```
+2. Adjust `inventory/hosts` and the YAML files under `group_vars/`.
+   The `firewall_cfg` structure controls interface names, address ranges,
+   nftables policy, DSCP classes and CAKE limits.
+3. Bootstrap the controller (optional but handy if using password auth):
+   ```bash
+   ansible-playbook bootstrap.yml -i inventory/hosts
+   ```
+4. Run the initial setup which installs required packages, Docker and Pi‑hole:
+   ```bash
+   ansible-playbook setup.yml -i inventory/hosts
+   ```
+5. Apply the firewall rules and QoS configuration:
+   ```bash
+   ansible-playbook firewall.yml -i inventory/hosts
+   ```
 
-## Requirements
+### Customising the firewall
 
-* Ansible (ensure it is installed and accessible on your system).
-* SSH access to target firewall hosts.
+Firewall behaviour is driven by variables under `group_vars/`.  The main file
+`firewalls.yml` documents every option – interface names, NAT, default policies
+and a list of simple allow/deny rules.  DSCP classes can be defined to mark
+traffic which the CAKE qdisc will then prioritise.
 
-## Usage
+The `first_setup` role also contains tasks to install Pi‑hole either natively or
+through Docker Compose.  Adjust settings such as `pihole_timezone` and
+`pihole_webpassword` in `roles/first_setup/defaults/main.yml` or override them in
+group vars.
 
-1. Clone the repository:
+### Diagnostics
 
+`diag_firewall.sh` can be executed on a deployed firewall to verify link state,
+addressing, routing, DNS and NAT configuration.  Example:
 ```bash
-git clone <repository_url>
-cd ansible-firewall
+ssh root@<firewall-ip> 'bash -s' < diag_firewall.sh | tee diag.log
 ```
 
-2. Install required Ansible roles and dependencies:
+### Experimental nDPI role
 
-```bash
-ansible-galaxy install -r requirements.yml
-```
-
-3. Edit inventory file (`inventory/hosts`) to match your environment.
-
-Remember to set up correctly your IP range, your NICs name from your Ubuntu install.
-
-All tethering will be automatically assigned the WAN NIC name you choose.
-
-4. Modify variables in `group_vars/` to fit your specific firewall requirements.
-
-5. Run the main playbook to deploy configurations:
-
-```bash
-ansible-playbook -i inventory/hosts setup.yml
-then 
-ansible-playbook -i inventory/hosts firewall.yml
-
-You can use any IP you want to first connect to the Ubuntu VM/Rpi/SBC, it will switch to the IP you set up for the LAN interface only after a reboot(to ensure that you don't lose connection towards it with ansible)
-
-```
-
-## Diagnostics
-
-To diagnose firewall settings, use the provided script:
-
-```bash
-./diag_firewall.sh
-```
-
-## nDPI Setup
-WIP, not functional, don't run this
-
-
-nDPI is installed automatically by the Ansible playbook. Ensure the
-`ndpi` role is listed in `site.yml` and run the playbook against your
-hosts:
-
-```bash
-```
+An unfinished role for traffic classification via nDPI exists but is disabled by
+default.  Uncomment the `ndpi` line in `firewall.yml` to experiment.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+PingBastion is released under the MIT License.  See [LICENSE](LICENSE) for
+details.
