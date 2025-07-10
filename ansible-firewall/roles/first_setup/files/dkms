@@ -1,0 +1,7 @@
+PACKAGE_NAME="xt_ndpi"
+PACKAGE_VERSION="4.2"
+BUILT_MODULE_NAME[0]="xt_ndpi"
+MAKE[0]="make -C src/ KERNELDIR=/lib/modules/${kernelver}/build"
+CLEAN[0]="make -C src/ clean"
+DEST_MODULE_LOCATION[0]="/extra"
+AUTOINSTALL="yes"

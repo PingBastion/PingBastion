@@ -17,3 +17,5 @@ pihole_toml_dest: "{{ pihole_project_dir }}/pihole.toml"
 
 # Docker CE version channel (leave empty for latest)
 docker_package_channel: "stable"
+ndpi_src_dir: "/usr/src/nDPI-{{ ndpi_version }}"
+xt_ndpi_src:  "/usr/src/xt_ndpi-{{ ndpi_version }}"

@@ -1,0 +1,18 @@
+PACKAGE_NAME="xt_ndpi"
+PACKAGE_VERSION="{{ ndpi_version }}"          # e.g. 4.2
+
+BUILT_MODULE_NAME[0]="xt_ndpi"
+DEST_MODULE_LOCATION[0]="/updates/dkms"
+AUTOINSTALL="yes"
+
+# Full nDPI source directory (must contain src/include/ndpi_main.h, etc.)
+NDPI_PATH="/usr/src/nDPI-{{ ndpi_version }}"
+
+# Export NDPI_PATH, point at the headers, and add -ffreestanding for stdint.h
+MAKE="NDPI_PATH=${NDPI_PATH} \
+      make KERNELDIR=/lib/modules/\${kernelver}/build \
+           NDPI_INC=${NDPI_PATH}/src/include \
+           EXTRA_CFLAGS=-ffreestanding \
+           -C ./src"
+
+CLEAN="make -C ./src clean"
