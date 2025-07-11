@@ -1,0 +1,8 @@
+{# -----------------------------------------------------------
+#  /etc/connlabel.conf  – AUTO-GENERATED, DO NOT EDIT MANUALLY
+#  Only "label <bit> <alias>" lines are allowed.
+# ----------------------------------------------------------- #}
+{% for pair in alias_id_final | dict2items | sort(attribute='value') %}
+{{ pair.value }} {{ pair.key }}
+{% endfor %}
+

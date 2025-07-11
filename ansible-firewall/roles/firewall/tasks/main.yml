@@ -6,6 +6,7 @@
 
 # 2 ▸ Interface configuration
 - import_tasks: netplan.yml
+- import_tasks: connlabel.yml
 
 # 3 ▸ Firewall ruleset
 - name: Render nftables.conf
@@ -16,6 +17,7 @@
     mode: "0644"
     validate: "nft -c -f %s"
   register: nft_cfg
+
 
 
 - name: Reload nftables rules

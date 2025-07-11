@@ -1,3 +1,38 @@
+# ---------------------------------------------------------------------------
+#  nftables + DSCP marking template (Jinja2)                                  
+# ---------------------------------------------------------------------------
+#  This file is rendered by Ansible with variables under `firewall_cfg.*`.
+#  Netify‑detected traffic (ct_label) is matched *before* any port/heuristic
+#  rule, and can optionally receive different DSCP marks per direction.
+# ---------------------------------------------------------------------------
+#  Example YAML inventory (all commented so nft can validate the template):
+#
+# firewall_cfg:
+#   interfaces:
+#     lan:
+#       nic: eth0
+#       cidr: 192.168.1.0/24
+#     wan:
+#       nic: ppp0
+#   policy:
+#     input:   drop
+#     forward: drop
+#     output:  accept
+#   nat: true
+#   rules: []                # extra filter rules rendered via rule_line.j2
+#   dscp_classes:
+#     youtube:
+#       mark_up:   af11          # client → CDN (small requests)
+#       mark_down: af31          # CDN → client (video segments)
+#       match:
+#         ct_label: netify.youtube
+#
+#     http:
+#       mark: af31               # same code both directions
+#       match:
+#         tcp_ports: [80]
+# ---------------------------------------------------------------------------
+
 #!/usr/sbin/nft -f
 flush ruleset
 
@@ -61,60 +96,69 @@ table ip nat {
 }
 {% endif %}
 
-# ── DSCP marking / mangle table ────────────────────────────────────────────
+# ── DSCP marking / mangle table — Netify first, ports fallback ─────────────
 {% if firewall_cfg.dscp_classes %}
 table inet mangle {
 
   chain prerouting {
     type filter hook prerouting priority -300;   # before conntrack
 
-{% for name, cls in firewall_cfg.dscp_classes.items() %}
-{%   set mark = cls.mark | default(cls.dscp | default('cs0')) %}
-{%   set m    = cls.match | default({}) %}
+    # 1. Netify matches FIRST (preferred over port/heuristic rules)
+{% for name, cls in firewall_cfg.dscp_classes.items()
+       if cls.match is defined and cls.match.ct_label is defined %}
+{%   set m         = cls.match %}
+{%   set raw_label = m.ct_label %}
+{%   set safe_lbl  = raw_label | replace('.', '_') | replace('-', '_') %}
+{%   set dl_mark   = cls.mark_down | default(cls.mark | default(cls.dscp | default('cs0'))) %}
+{%   set ul_mark   = cls.mark_up   | default(dl_mark) %}
+    # ── {{ name }} (ct_label: {{ raw_label }} → {{ safe_lbl }}) ────────────
+    # Download  (WAN → LAN)
+    iifname $WAN oifname $LAN ct label "{{ safe_lbl }}" ip dscp cs0 counter \
+        ip dscp set {{ dl_mark }} comment "{{ name }} ctlabel-dl";
+    # Upload    (LAN → WAN)
+    iifname $LAN oifname $WAN ct label "{{ safe_lbl }}" ip dscp cs0 counter \
+        ip dscp set {{ ul_mark }} comment "{{ name }} ctlabel-ul";
+{% endfor %}
 
+    # 2. Port / behaviour-based FALLBACK rules
+{% for name, cls in firewall_cfg.dscp_classes.items()
+       if not (cls.match is defined and cls.match.ct_label is defined) %}
+{%   set m     = cls.match | default({}) %}
+{%   set mark  = cls.mark | default(cls.dscp | default('cs0')) %}
     # ── {{ name }} ─────────────────────────────────────────────────────────
-{# ----- UDP / TCP port matches ------------------------------------------- #}
 {%   if m.udp_ports is defined %}
-    ip protocol udp udp dport { {{ port_list(m.udp_ports) }} } \
-        ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} udp-d";
-    ip protocol udp udp sport { {{ port_list(m.udp_ports) }} } \
-        ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} udp-s";
+    ip protocol udp udp dport { {{ port_list(m.udp_ports) }} } ip dscp cs0 counter \
+        ip dscp set {{ mark }} comment "{{ name }} udp-d";
+    ip protocol udp udp sport { {{ port_list(m.udp_ports) }} } ip dscp cs0 counter \
+        ip dscp set {{ mark }} comment "{{ name }} udp-s";
 {%   endif %}
 {%   if m.tcp_ports is defined %}
-    ip protocol tcp tcp dport { {{ port_list(m.tcp_ports) }} } \
-        ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} tcp-d";
-    ip protocol tcp tcp sport { {{ port_list(m.tcp_ports) }} } \
-        ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} tcp-s";
+    ip protocol tcp tcp dport { {{ port_list(m.tcp_ports) }} } ip dscp cs0 counter \
+        ip dscp set {{ mark }} comment "{{ name }} tcp-d";
+    ip protocol tcp tcp sport { {{ port_list(m.tcp_ports) }} } ip dscp cs0 counter \
+        ip dscp set {{ mark }} comment "{{ name }} tcp-s";
 {%   endif %}
-
-{# ----- TCP flags + optional length (“pure ACK”) -------------------------- #}
 {%   if m.protocol is defined and m.protocol == 'tcp' and m.flags is defined %}
     ip protocol tcp tcp flags {{ m.flags }}{% if m.length_lt is defined %} meta length < {{ m.length_lt }}{% endif %} \
         ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} tcp-flags";
 {%   endif %}
-
-{# ----- UDP length-based rule -------------------------------------------- #}
 {%   if m.protocol is defined and m.protocol == 'udp' and m.length_lt is defined %}
-    ip protocol udp meta length < {{ m.length_lt }} \
-        ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} udp-lt";
+    ip protocol udp meta length < {{ m.length_lt }} ip dscp cs0 counter \
+        ip dscp set {{ mark }} comment "{{ name }} udp-lt";
 {%   endif %}
-
-{# ----- ICMP echo request / reply ---------------------------------------- #}
 {%   if m.protocol is defined and m.protocol == 'icmp' and m.icmp_types is defined %}
 {%     for t in m.icmp_types %}
-    ip protocol icmp icmp type {{ t }} \
-        ip dscp cs0 counter ip dscp set {{ mark }} comment "{{ name }} icmp-{{ t }}";
+    ip protocol icmp icmp type {{ t }} ip dscp cs0 counter \
+        ip dscp set {{ mark }} comment "{{ name }} icmp-{{ t }}";
 {%     endfor %}
 {%   endif %}
-
-{# ----- Large-flow rule --------------------------------------------------- #}
 {%   if m.ct_bytes_ge is defined %}
     ct bytes ge {{ m.ct_bytes_ge }} ip dscp cs0 counter \
         ip dscp set {{ mark }} comment "{{ name }} large-flow";
 {%   endif %}
-
 {% endfor %}
-    # Everything else: best-effort
+
+    # 3. Everything else: best-effort
     ip dscp cs0 counter comment "default best-effort";
   }
 }
