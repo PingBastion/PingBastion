@@ -66,9 +66,10 @@ firewall_cfg:
 
   dscp_classes:
   
+    static:
       # ── Highest-priority control traffic ───────────────────────────────────
       ack_small:
-        mark: ef
+        mark: cs7
         match:
           protocol: tcp
           flags: ack          # pure ACKs
@@ -88,16 +89,24 @@ firewall_cfg:
   
       # ── Application classes ────────────────────────────────────────────────
       dns:
-        mark: cs5
+        mark: cs6
         match:
           udp_ports: [53]
           tcp_ports: [53]
   
+      https:
+        mark: cs1
+        match:
+          tcp_ports: [443]
+          udp_ports: [443]
   
       http:
-        mark: af31
+        mark: cs1
         match:
           tcp_ports: [80]
+          upd_ports: [80]
+
+      
   
       torrent:
         mark: cs1
@@ -106,48 +115,68 @@ firewall_cfg:
           udp_ports: "6881-6999,51413,6969"
   
       large_flows:
-        mark: af13
+        mark: cs1
         match:
           ct_bytes_ge: 5000000   # ≥ 5 MB in one direction
   
       league_of_legends:
-        mark: ef
+        mark: cs7
         match:
           tcp_ports: "2099,5222-5223,8393-8400"
           udp_ports: "5000-5500,8088,16200-16299"
   
-  
+    netifyd: 
+
+    
+    #  http_connect:
+    #    mark: cs1
+    #    match: { ct_label: HTTP/Connect }       
+    #  httpproxy:
+    #    mark: cs1
+    #    match: { ct_label: HTTP/Proxy } 
+    #  http2:
+    #    mark: cs1
+    #    match: { ct_label: HTTP/2 } 
+    #  https:
+    #    mark: cs1
+    #    match: { ct_label: HTTP/S }    
+      http:
+        mark: cs1
+        match: { ct_label: HTTP }     
       # ── Video / Music streaming ──────────────────────────────
       youtube:
-        mark: af31
+        mark: af23
         match: { ct_label: netify.youtube }
   
       netflix:
-        mark: af31
+        mark: af23
         match: { ct_label: netify.netflix }
-  
       amazon_prime_video:
-        mark: af31
+        mark: af23
         match: { ct_label: netify.amazon-prime }
   
       disney_plus:
-        mark: af31
+        mark: af43
         match: { ct_label: netify.disney-plus }
   
       hulu:
-        mark: af31
+        mark: af33
         match: { ct_label: netify.hulu }
-  
+
+      # quic:
+      #   mark:  af23
+      #   match: { ct_label: QUIC }  
+
       twitch:
-        mark: af31
+        mark: af33
         match: { ct_label: netify.twitch }
   
       spotify:
-        mark: af31
+        mark: af33
         match: { ct_label: netify.spotify }
   
       soundcloud:
-        mark: af31
+        mark: af33
         match: { ct_label: netify.soundcloud }
   
       # ── Gaming platforms / game traffic ─────────────────────
@@ -170,14 +199,15 @@ firewall_cfg:
       nintendo_online:
         mark:  cs1
         match: { ct_label: Nintendo }       # numeric ID 173
-  
+
+
       riot_games:
-        mark: ef
+        mark: cs7
         match: { ct_label: Riot/Games }     # numeric ID 292
 
   
       roblox:
-        mark: cs1
+        mark: cs4
         match: { ct_label: netify.roblox }
   
       # ── Cloud gaming / high-bitrate interactive ─────────────
@@ -187,27 +217,27 @@ firewall_cfg:
   
       # ── Software / OS updates & CDNs ────────────────────────
       windows_update:
-        mark: af21
+        mark: af13
         match: { ct_label: netify.windows-update }
   
       apple_updates:
-        mark: af21
+        mark: af13
         match: { ct_label: netify.apple-icloud }   # iCloud + macOS/iOS CDN
   
       ubuntu_updates:
-        mark: af21
+        mark: af13
         match: { ct_label: netify.ubuntu }
   
       amazon_cloudfront:
-        mark: af21
+        mark: af13
         match: { ct_label: netify.amazon-cloudfront }
   
       akamai_cdn:
-        mark: af21
+        mark: af13
         match: { ct_label: netify.akamai }
   
       fastly_cdn:
-        mark: af21
+        mark: af13
         match: { ct_label: netify.fastly }
   
       # ── Bulk / P2P ───────────────────────────────────────────
@@ -241,7 +271,7 @@ firewall_cfg:
         mark: cs1
         match: { ct_label: OOKLA }          # numeric 191
       deezer:
-        mark: af31          # same class as Spotify/SoundCloud
+        mark: af13          # same class as Spotify/SoundCloud
         match: { ct_label: deezer }
 
   ##########################################################################
@@ -256,6 +286,7 @@ firewall_cfg:
       download: 100mbit              # ingress  (WAN→LAN)
       upload:   10mbit              # egress   (LAN→WAN)
       rtt: 5ms
+      interval: 5ms
       overhead: 44
       mpu: 96
       diffserv: diffserv8
@@ -266,6 +297,7 @@ firewall_cfg:
       overhead: 44
       mpu: 96    
       nic: *lan_if
+      interval: 5ms
       download: 1gbit
       upload:   1gbit
       diffserv: diffserv8

@@ -1,0 +1,4 @@
+{# /etc/ipset.conf – generated #}
+{% for name in (firewall_cfg.dscp_classes.netifyd | default({})).keys() %}
+create {{ name }} hash:ip family inet
+{% endfor %}

@@ -14,6 +14,16 @@
 - name: Reload nftables            # template re-parsed without restart
   ansible.builtin.command: nft -f /etc/nftables.conf
   become: yes
+- name: Restart netifyd
+  systemd:
+    name: netifyd
+    state: restarted
+    enabled: yes
+# roles/firewall/handlers/main.yml
+
+- name: Reload ipset-persistent
+  become: true
+  ansible.builtin.command: netfilter-persistent reload ipset
 
   ###########################################################################
 # Flush handlers *now* (they run asynchronously) then exit the play safely

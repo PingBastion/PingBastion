@@ -6,9 +6,30 @@
 
 # 2 ▸ Interface configuration
 - import_tasks: netplan.yml
-- import_tasks: connlabel.yml
-
+#- import_tasks: connlabel.yml
+- import_tasks: netifyd.yml
 # 3 ▸ Firewall ruleset
+- name: Render nftables.conf
+  template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf.new 
+    owner: root
+    mode: "0644"
+
+- name: Deploy iptables-nft DSCP rules (highest precedence)
+  template:
+    src: iptables_dscp.rules.j2
+    dest: /etc/iptables/10-dscp.rules.new
+    mode: '0644'
+  become: true
+
+- name: Deploy iptables-nft DSCP rules (highest precedence)
+  template:
+    src: iptables_dscp.rules.j2
+    dest: /etc/iptables/10-dscp.rules
+    mode: '0644'
+  become: true
+
 - name: Render nftables.conf
   template:
     src: nftables.conf.j2
@@ -16,14 +37,18 @@
     owner: root
     mode: "0644"
     validate: "nft -c -f %s"
-  register: nft_cfg
 
 
+- name: Restore iptables-nft
+  command: iptables-nft-restore /etc/iptables/10-dscp.rules
+  become: true
 
 - name: Reload nftables rules
-  ansible.builtin.command: nft -f /etc/nftables.conf
-  when: nft_cfg.changed
-  notify: enable_nftables          # handled below
+  command: nft -f /etc/nftables.conf
+  become: true
 
 # 4 ▸ Optional QoS
 - import_tasks: qos_persist.yml  # Add this line
+
+
+# roles/firewall/handlers/main.yml

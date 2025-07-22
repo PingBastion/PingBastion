@@ -1,0 +1,29 @@
+
+- name: Render Netify ipset 
+  template:
+    src: ipset.conf.j2
+    dest: /etc/ipset/ipsets
+    owner: root
+    group: root
+    mode: '0644'
+
+
+#- name: clean   ipsets
+#  command: sh -c 'ipset destroy < /etc/ipset/ipsets'
+#
+#- name: Apply Netify ipset
+#  command: sh -c 'ipset restore < /etc/ipset/ipsets'
+
+- name: Render Netify ipset plugin config
+  template:
+    src: ipset.json.j2
+    dest: /etc/netifyd/plugins.d/ipset.json
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Restart netifyd
+  systemd:
+    name: netifyd
+    state: restarted
+    enabled: yes

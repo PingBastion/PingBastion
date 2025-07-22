@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# cake-shaper.sh — Reset all qdiscs/IFBs, then apply CAKE shaping
+# cake-shaper.sh — Reset all qdiscs/IFBs, apply CAKE shaping **and** enable TCP BBR
 #
 # Requires Jinja2 variables:
 #   firewall_cfg.cake.wan.*
@@ -12,6 +12,32 @@ set -euo pipefail
 
 {% set wan = firewall_cfg.cake.wan %}
 {% set lan = firewall_cfg.cake.lan %}
+
+# ── 0. ENABLE TCP BBR ──────────────────────────────────────────────────────
+echo "► Enabling TCP BBR congestion control…"
+
+# 0.1 Make sure the tcp_bbr module is actually loaded (if it is a loadable module)
+if ! lsmod | awk '{print $1}' | grep -qw tcp_bbr; then
+    echo "  • tcp_bbr module not loaded; attempting to load it…"
+    modprobe tcp_bbr 2>/dev/null || true
+fi
+
+# 0.2 Verify that BBR is now advertised by the kernel
+if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
+    echo "⚠  BBR still not listed in tcp_available_congestion_control — this kernel may lack support. Continuing anyway."
+fi
+
+# 0.3 Use Fair Queuing for any interface that doesn’t get an explicit root qdisc
+sysctl -q -w net.core.default_qdisc=fq
+
+# 0.4 Attempt to switch the system-wide default to BBR; warn (but don’t abort) if we can’t
+if sysctl -q -w net.ipv4.tcp_congestion_control=bbr; then
+    echo "✓ BBR enabled system-wide (net.ipv4.tcp_congestion_control=bbr)."
+else
+    echo "⚠  Could not set net.ipv4.tcp_congestion_control=bbr — leaving current algorithm in place."
+fi
+
+echo
 
 # ── Interface names ────────────────────────────────────────────────────────
 WAN="{{ wan.nic }}"
@@ -85,7 +111,7 @@ tc qdisc add dev "$LAN" ingress
 tc filter add dev "$LAN" ingress matchall action mirred egress redirect dev "$IFB_LAN"
 
 tc qdisc add dev "$IFB_LAN" root cake \
-    bandwidth {{ lan.download }} {{ lan.diffserv }} {{ lan.extra_opts }}
+    bandwidth {{ lan.download }} {{ lan.diffserv }} {{ lan.extra_opts }} rtt {{ lan.rtt }}
 
 # ── 6. STATUS ──────────────────────────────────────────────────────────────
 echo
@@ -94,3 +120,6 @@ for d in "$WAN" "$LAN" "$IFB_WAN" "$IFB_LAN"; do
     echo "── $d ─────────────────────────────────────────"
     tc -s qdisc show dev "$d"
 done
+
+nft -f /etc/nftables.conf
+iptables-nft-restore /etc/iptables/10-dscp.rules
