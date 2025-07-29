@@ -1,125 +1,322 @@
-#!/bin/bash
-#
-# cake-shaper.sh — Reset all qdiscs/IFBs, apply CAKE shaping **and** enable TCP BBR
-#
-# Requires Jinja2 variables:
-#   firewall_cfg.cake.wan.*
-#   firewall_cfg.cake.lan.*
-#
-# ────────────────────────────────────────────────────────────────────────────
+{# ----------------- Jinja helpers (trimmed so no bytes before shebang) ----------------- #}
+{%- macro ports_csv(m, key) -%}
+{%- if m is mapping and (key in m) and m[key] is not none -%}
+  {%- if m[key] is string -%}{{ m[key] }}
+  {%- elif m[key] is sequence -%}{{ m[key] | join(',') }}
+  {%- else -%}{% endif -%}
+{%- else -%}{% endif -%}
+{%- endmacro -%}
 
+# ----------------- tc helpers (with checksum fix) -----------------
+DSCP() {
+  case "${1,,}" in
+    cs0) echo 0;; cs1) echo 8;; af11) echo 10;; af12) echo 12;; af13) echo 14;;
+    cs2) echo 16;; af21) echo 18;; af22) echo 20;; af23) echo 22;; cs3) echo 24;;
+    af31) echo 26;; af32) echo 28;; af33) echo 30;; cs4) echo 32;; af41) echo 34;;
+    af42) echo 36;; af43) echo 38;; cs5) echo 40;; ef) echo 46;; cs6) echo 48;; cs7) echo 56;;
+    *)   echo 0;;
+  esac
+}
+
+expand_ports() {
+  local list="${1:-}" IFS=','
+  for tok in $list; do
+    if [[ "$tok" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      local s=${BASH_REMATCH[1]} e=${BASH_REMATCH[2]}
+      for ((p=s; p<=e; p++)); do echo "$p"; done
+    else
+      [[ -n "$tok" ]] && echo "$tok"
+    fi
+  done
+}
+
+cake_handle() {
+  tc qdisc show dev "$1" | awk '/qdisc cake/ {print $3; exit}'
+}
+
+# -------- checksum-fixed setters --------
+set_dscp_port_flower() {
+  local dev="$1" handle="$2" prio="$3" proto="$4" dir="$5" port="$6" dscp_dec="$7"
+  local tos=$(( dscp_dec << 2 ))
+
+  # IPv4: include ip4h in csum action
+  tc filter add dev "$dev" parent "$handle" protocol ip   prio "$prio" \
+    flower ip_proto "$proto" ${dir}_port "$port" skip_hw \
+    action pedit munge ip tos set "$tos" pipe \
+           csum ip4h tcp udp pipe \
+           skbedit priority "$dscp_dec" 2>/dev/null || true
+
+  # IPv6: no ip4h
+  tc filter add dev "$dev" parent "$handle" protocol ipv6 prio "$prio" \
+    flower ip_proto "$proto" ${dir}_port "$port" skip_hw \
+    action pedit munge ip6 traffic_class set "$tos" pipe \
+           csum tcp udp pipe \
+           skbedit priority "$dscp_dec" 2>/dev/null || true
+}
+
+set_dscp_tcpflags_flower() {
+  local dev="$1" handle="$2" prio="$3" flagsmask="$4" flagsval="$5" dscp_dec="$6"
+  local tos=$(( dscp_dec << 2 ))
+
+  tc filter add dev "$dev" parent "$handle" protocol ip   prio "$prio" \
+    flower ip_proto tcp tcp_flags "$flagsmask/$flagsval" skip_hw \
+    action pedit munge ip tos set "$tos" pipe \
+           csum ip4h tcp udp pipe \
+           skbedit priority "$dscp_dec" 2>/dev/null || true
+
+  tc filter add dev "$dev" parent "$handle" protocol ipv6 prio "$prio" \
+    flower ip_proto tcp tcp_flags "$flagsmask/$flagsval" skip_hw \
+    action pedit munge ip6 traffic_class set "$tos" pipe \
+           csum tcp udp pipe \
+           skbedit priority "$dscp_dec" 2>/dev/null || true
+}
+
+set_dscp_icmp() {
+  local dev="$1" handle="$2" prio="$3" dscp_dec="$4"
+  local tos=$(( dscp_dec << 2 ))
+
+  tc filter add dev "$dev" parent "$handle" protocol ip   prio "$prio" \
+    flower ip_proto icmp skip_hw \
+    action pedit munge ip tos set "$tos" pipe \
+           csum ip4h udp tcp pipe \
+           skbedit priority "$dscp_dec" 2>/dev/null || true
+
+  tc filter add dev "$dev" parent "$handle" protocol ipv6 prio "$prio" \
+    flower ip_proto icmpv6 skip_hw \
+    action pedit munge ip6 traffic_class set "$tos" pipe \
+           csum tcp udp pipe \
+           skbedit priority "$dscp_dec" 2>/dev/null || true
+}
+
+set_dscp_ipset_basic() {
+  local dev="$1" handle="$2" prio="$3" setname="$4" direction="$5" dscp_dec="$6"
+  local tos=$(( dscp_dec << 2 ))
+
+  # IPv4
+  tc filter add dev "$dev" parent "$handle" protocol ip   prio "$prio" \
+    basic match "ipset(${setname} ${direction})" \
+    action pedit munge ip tos set "$tos" pipe \
+           csum ip4h tcp udp pipe \
+           skbedit priority "$dscp_dec" 2>/dev/null || true
+
+  # IPv6
+  tc filter add dev "$dev" parent "$handle" protocol ipv6 prio "$prio" \
+    basic match "ipset(${setname} ${direction})" \
+    action pedit munge ip6 traffic_class set "$tos" pipe \
+           csum tcp udp pipe \
+           skbedit priority "$dscp_dec" 2>/dev/null || true
+}
+
+apply_static_class() {
+  local dev="$1" handle="$2" name="$3" phb="$4" tcp_ports="$5" udp_ports="$6" proto="$7" flags="$8" length_lt="$9" icmp_types="${10}"
+  local dscp_dec; dscp_dec="$(DSCP "$phb")"
+  local prio_base=10
+
+  # NOTE: length_lt / ct_bytes_ge cannot be expressed here and are ignored.
+
+  if [[ -n "${tcp_ports}" ]]; then
+    while read -r p; do
+      set_dscp_port_flower "$dev" "$handle" $((prio_base+0)) tcp sport "$p" "$dscp_dec"
+      set_dscp_port_flower "$dev" "$handle" $((prio_base+0)) tcp dport "$p" "$dscp_dec"
+    done < <(expand_ports "$tcp_ports")
+  fi
+
+  if [[ -n "${udp_ports}" ]]; then
+    while read -r p; do
+      set_dscp_port_flower "$dev" "$handle" $((prio_base+1)) udp sport "$p" "$dscp_dec"
+      set_dscp_port_flower "$dev" "$handle" $((prio_base+1)) udp dport "$p" "$dscp_dec"
+    done < <(expand_ports "$udp_ports")
+  fi
+
+  if [[ "$proto" == "tcp" && "$flags" == "ack" ]]; then
+    set_dscp_tcpflags_flower "$dev" "$handle" $((prio_base+2)) 0x10 0x10 "$dscp_dec"
+  fi
+
+  if [[ "$proto" == "icmp" && -n "$icmp_types" ]]; then
+    set_dscp_icmp "$dev" "$handle" $((prio_base+4)) "$dscp_dec"
+  fi
+}
+
+apply_netify_ipset() {
+  local dev="$1" handle="$2" setname="$3" phb="$4"
+  local dscp_dec; dscp_dec="$(DSCP "$phb")"
+  local prio=20
+
+  set_dscp_ipset_basic "$dev" "$handle" "$prio" "$setname" src "$dscp_dec"
+  set_dscp_ipset_basic "$dev" "$handle" "$prio" "$setname" dst "$dscp_dec"
+}
+
+
+#!/bin/bash
 set -euo pipefail
 
-{% set wan = firewall_cfg.cake.wan %}
-{% set lan = firewall_cfg.cake.lan %}
+# ---- CLI args ------------------------------------------------------------
+usage() {
+  cat <<'USAGE'
+Usage: $0 [OPTIONS]
 
-# ── 0. ENABLE TCP BBR ──────────────────────────────────────────────────────
+Options:
+  -c, --cleanup   Remove all qdiscs and IFB devices, then exit (do not reapply CAKE/filters)
+  -h, --help      Show this help and exit
+USAGE
+}
+
+CLEANUP_ONLY=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -c|--cleanup) CLEANUP_ONLY=1; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+# ---- Config (Ansible / Jinja) --------------------------------------------
+WAN="{{ firewall_cfg.interfaces.wan.nic }}"
+LAN="{{ firewall_cfg.interfaces.lan.nic }}"
+IFB_WAN="{{ firewall_cfg.cake.wan.ifb | default('ifb_' ~ firewall_cfg.interfaces.wan.nic) }}"
+
+UP_RATE="{{ firewall_cfg.cake.wan.up   | default('10mbit') }}"
+DOWN_RATE="{{ firewall_cfg.cake.wan.down | default('100mbit') }}"
+
+CAKE_OPTS_UPLOAD="{{ firewall_cfg.cake.wan.extra | default('diffserv8 nowash triple-isolate nat ack-filter-aggressive split-gso rtt 5ms overhead 44 mpu 96') }}"
+CAKE_OPTS_DOWNLOAD="{{ firewall_cfg.cake.wan.extra | default('diffserv8 nowash triple-isolate nat ack-filter-aggressive split-gso rtt 5ms overhead 44 mpu 96') }}"
+
+NFT_CONF="{{ firewall_cfg.nftables.conf_path | default('/etc/nftables.conf') }}"
+
+# ---- Enable TCP BBR -------------------------------------------------------
 echo "► Enabling TCP BBR congestion control…"
-
-# 0.1 Make sure the tcp_bbr module is actually loaded (if it is a loadable module)
 if ! lsmod | awk '{print $1}' | grep -qw tcp_bbr; then
-    echo "  • tcp_bbr module not loaded; attempting to load it…"
-    modprobe tcp_bbr 2>/dev/null || true
+  modprobe tcp_bbr 2>/dev/null || true
 fi
-
-# 0.2 Verify that BBR is now advertised by the kernel
-if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
-    echo "⚠  BBR still not listed in tcp_available_congestion_control — this kernel may lack support. Continuing anyway."
-fi
-
-# 0.3 Use Fair Queuing for any interface that doesn’t get an explicit root qdisc
 sysctl -q -w net.core.default_qdisc=fq
-
-# 0.4 Attempt to switch the system-wide default to BBR; warn (but don’t abort) if we can’t
-if sysctl -q -w net.ipv4.tcp_congestion_control=bbr; then
-    echo "✓ BBR enabled system-wide (net.ipv4.tcp_congestion_control=bbr)."
-else
-    echo "⚠  Could not set net.ipv4.tcp_congestion_control=bbr — leaving current algorithm in place."
-fi
-
+sysctl -q -w net.ipv4.tcp_congestion_control=bbr || \
+  echo "⚠ Could not set net.ipv4.tcp_congestion_control=bbr (kernel may not support it)."
 echo
 
-# ── Interface names ────────────────────────────────────────────────────────
-WAN="{{ wan.nic }}"
-LAN="{{ lan.nic }}"
-
-# IFB names (15-char limit: "ifb_" + 11 chars of NIC)
-IFB_WAN="ifb_{{ wan.nic[:11] }}"
-IFB_LAN="ifb_{{ lan.nic[:11] }}"
-
-# ── 1. GLOBAL CLEAN-UP STEP ────────────────────────────────────────────────
+# ---- Cleanup --------------------------------------------------------------
 cleanup() {
-    echo "► Cleaning up existing qdiscs and IFB devices…"
+  echo "► Cleaning up existing qdiscs and IFB devices…"
 
-    # Delete any IFB devices already present
-    mapfile -t _ifbs < <(ip -o link show type ifb | awk -F': ' '{print $2}')
-    for d in "${_ifbs[@]}"; do
-        ip link set dev "$d" down   2>/dev/null || true
-        ip link delete "$d" type ifb 2>/dev/null || true
-        echo "  • Removed IFB $d"
-    done
+  mapfile -t _ifbs < <(ip -o link show type ifb 2>/dev/null | awk -F': ' '{print $2}')
+  for d in "${_ifbs[@]:-}"; do
+    ip link set dev "$d" down   2>/dev/null || true
+    ip link delete "$d" type ifb 2>/dev/null || true
+  done
 
-    # Flush qdiscs (root + ingress) on every interface in /sys/class/net
-    for dev in $(ls /sys/class/net); do
-        tc qdisc del dev "$dev" root    2>/dev/null || true
-        tc qdisc del dev "$dev" ingress 2>/dev/null || true
-    done
-    echo "✓ All qdiscs reset; IFBs removed."
+  for dev in $(ls /sys/class/net); do
+    tc qdisc del dev "$dev" root    2>/dev/null || true
+    tc qdisc del dev "$dev" ingress 2>/dev/null || true
+  done
+  echo "✓ All qdiscs reset; IFBs removed."
 }
 cleanup
 
-# ── 2. CREATE IFBs ─────────────────────────────────────────────────────────
+if (( CLEANUP_ONLY )); then
+  echo "► Cleanup requested; exiting without reapplying rules."
+  exit 0
+fi
+
+# ---- IFB creation ---------------------------------------------------------
+echo "► Creating IFB $IFB_WAN for WAN ingress..."
 modprobe ifb 2>/dev/null || true
+ip link set dev "$IFB_WAN" down 2>/dev/null || true
+ip link delete "$IFB_WAN" type ifb 2>/dev/null || true
+ip link add "$IFB_WAN" type ifb 2>/dev/null || true
+ip link set dev "$IFB_WAN" up
 
-for ifb in "$IFB_WAN" "$IFB_LAN"; do
-    ip link add "$ifb" type ifb 2>/dev/null || true
-    ip link set dev "$ifb" up
-done
-
-# ── 3. HELPERS ─────────────────────────────────────────────────────────────
+# ---- Helpers --------------------------------------------------------------
 flush_qdisc() {
-    local DEV="$1"
-    tc qdisc del dev "$DEV" root    2>/dev/null || true
-    tc qdisc del dev "$DEV" ingress 2>/dev/null || true
+  local DEV="$1"
+  tc qdisc del dev "$DEV" root    2>/dev/null || true
+  tc qdisc del dev "$DEV" ingress 2>/dev/null || true
 }
 
-# ── 4. WAN CONFIG ──────────────────────────────────────────────────────────
+# ---- CAKE setup (WAN egress + IFB ingress) --------------------------------
+echo "► Applying CAKE on WAN ($WAN) and IFB ($IFB_WAN)…"
 flush_qdisc "$WAN"
 
-# WAN upload (egress)
+# Upload shaping on WAN egress
 tc qdisc add dev "$WAN" root cake \
-    bandwidth {{ wan.upload }} {{ wan.diffserv }} {{ wan.extra_opts }} \
-    rtt {{ wan.rtt }} overhead {{ wan.overhead }} mpu {{ wan.mpu }}
+  bandwidth "$UP_RATE" $CAKE_OPTS_UPLOAD
 
-# WAN download (ingress → IFB_WAN)
-tc qdisc add dev "$WAN" ingress
-tc filter add dev "$WAN" ingress matchall action mirred egress redirect dev "$IFB_WAN"
+# Mirror WAN ingress to IFB for download shaping
+modprobe sch_ingress 2>/dev/null || true
+tc qdisc replace dev "$WAN" handle ffff: ingress 2>/dev/null || true
+tc filter replace dev "$WAN" parent ffff: protocol all prio 10 u32 \
+  match u32 0 0 \
+  action mirred egress redirect dev "$IFB_WAN"
 
+# Download shaping on IFB
 tc qdisc add dev "$IFB_WAN" root cake \
-    bandwidth {{ wan.download }} {{ wan.diffserv }} {{ wan.extra_opts }} \
-    rtt {{ wan.rtt }} overhead {{ wan.overhead }} mpu {{ wan.mpu }}
+  bandwidth "$DOWN_RATE" $CAKE_OPTS_DOWNLOAD
 
-# ── 5. LAN CONFIG ──────────────────────────────────────────────────────────
+# ---- LAN cleanup (no shaping) --------------------------------------------
 flush_qdisc "$LAN"
 
-# LAN upload (LAN → WAN)
-tc qdisc add dev "$LAN" root cake \
-    bandwidth {{ lan.upload }} {{ lan.diffserv }} {{ lan.extra_opts }}
+# ---- Reload nftables firewall (NOT DSCP) ----------------------------------
+if [ -f "$NFT_CONF" ]; then
+  echo "► Reloading nftables firewall rules from $NFT_CONF …"
+  if nft --check -f "$NFT_CONF"; then
+    nft -f "$NFT_CONF"
+  else
+    echo "ERROR: nftables config check failed! Not applying."
+    exit 1
+  fi
+fi
 
-# LAN download (ingress → IFB_LAN)
-tc qdisc add dev "$LAN" ingress
-tc filter add dev "$LAN" ingress matchall action mirred egress redirect dev "$IFB_LAN"
+echo "✓ Device / qdisc setup complete."
+# ---- Part 2: DSCP marking for `static` classes ----------------------------
+WAN_HANDLE="$(cake_handle "$WAN" || true)"
+IFB_HANDLE="$(cake_handle "$IFB_WAN" || true)"
 
-tc qdisc add dev "$IFB_LAN" root cake \
-    bandwidth {{ lan.download }} {{ lan.diffserv }} {{ lan.extra_opts }} rtt {{ lan.rtt }}
+if [[ -z "$WAN_HANDLE" || -z "$IFB_HANDLE" ]]; then
+  echo "ERROR: Could not auto-detect CAKE handles on $WAN / $IFB_WAN."
+  tc qdisc show dev "$WAN" || true
+  tc qdisc show dev "$IFB_WAN" || true
+  exit 1
+fi
 
-# ── 6. STATUS ──────────────────────────────────────────────────────────────
-echo
-echo "CAKE shaping applied. Current qdisc state:"
-for d in "$WAN" "$LAN" "$IFB_WAN" "$IFB_LAN"; do
-    echo "── $d ─────────────────────────────────────────"
-    tc -s qdisc show dev "$d"
-done
+# Clear existing DSCP filters on CAKE roots
+tc filter del dev "$WAN"     parent "$WAN_HANDLE" 2>/dev/null || true
+tc filter del dev "$IFB_WAN" parent "$IFB_HANDLE" 2>/dev/null || true
 
-nft -f /etc/nftables.conf
-iptables-nft-restore /etc/iptables/10-dscp.rules
+echo "► Applying tc DSCP classification (static) …"
+
+{% set dscp_classes = firewall_cfg.dscp_classes | default({}) %}
+{% set static = dscp_classes.static | default({}) %}
+{% for name, cls in static.items() %}
+{% set phb = (cls.mark | default(cls.dscp | default('cs0'))) %}
+{% set m = cls.match | default({}) %}
+{% set tcp_ports_csv = ports_csv(m, 'tcp_ports') %}
+{% set udp_ports_csv = ports_csv(m, 'udp_ports') %}
+{% set icmpt = m.get('icmp_types') %}
+{% set icmp_types_csv = (icmpt | join(',')) if icmpt else '' %}
+
+# {{ name }}
+apply_static_class "$WAN"     "$WAN_HANDLE" "{{ name }}" "{{ phb }}" \
+  "{{ tcp_ports_csv }}" "{{ udp_ports_csv }}" \
+  "{{ m.get('protocol','') }}" "{{ m.get('flags','') }}" "{{ m.get('length_lt','') }}" \
+  "{{ icmp_types_csv }}"
+
+apply_static_class "$IFB_WAN" "$IFB_HANDLE" "{{ name }}" "{{ phb }}" \
+  "{{ tcp_ports_csv }}" "{{ udp_ports_csv }}" \
+  "{{ m.get('protocol','') }}" "{{ m.get('flags','') }}" "{{ m.get('length_lt','') }}" \
+  "{{ icmp_types_csv }}"
+{% endfor %}
+
+echo "✓ static DSCP rules installed."
+
+# ---- Part 3: DSCP marking for `netifyd` (by ipset name == dict key) -------
+echo "► Applying tc DSCP classification (netifyd/ipset) …"
+
+{% set dscp_classes = firewall_cfg.dscp_classes | default({}) %}
+{% set netifyd = dscp_classes.netifyd | default({}) %}
+{% for name, cls in netifyd.items() %}
+{% set phb = (cls.mark | default(cls.dscp | default('cs0'))) %}
+
+# {{ name }}
+apply_netify_ipset "$WAN"     "$WAN_HANDLE" "{{ name }}" "{{ phb }}"
+apply_netify_ipset "$IFB_WAN" "$IFB_HANDLE" "{{ name }}" "{{ phb }}"
+{% endfor %}
+
+echo "✓ netifyd DSCP rules installed."

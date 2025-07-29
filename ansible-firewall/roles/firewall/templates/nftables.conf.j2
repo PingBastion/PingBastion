@@ -4,46 +4,50 @@ flush ruleset
 define LAN="{{ firewall_cfg.interfaces.lan.nic }}";
 define WAN="{{ firewall_cfg.interfaces.wan.nic }}";
 
-{% macro ports(list) -%}
-{{ list | join(',') if list is iterable and not list is string else list }}
+{% macro ports(p) -%}
+  {%- if p is sequence and p is not string -%}
+    {{ p | join(',') }}
+  {%- else -%}
+    {{ p }}
+  {%- endif -%}
 {%- endmacro %}
 
-{% set static = firewall_cfg.dscp_classes.static  | default({}) %}
 {% set fw_rules = firewall_cfg.rules | default([]) %}
+{% set IFB_WAN  = firewall_cfg.cake.wan.ifb | default('ifb_' ~ firewall_cfg.interfaces.wan.nic) %}
 
-# ---------------- FILTER TABLE ----------------
+# ===================== FILTER TABLE =====================
 
 table inet filter {
-
   chain input {
     type filter hook input priority 0;
     policy {{ firewall_cfg.policy.input }};
     ct state established,related accept;
     iif lo accept;
 
-{% for r in fw_rules if r.get('chain') == 'input' %}
-{%   set src   = r.get('from') %}
-{%   set proto = r.get('proto') %}
-{%   if src == 'lan' %}
-    iifname $LAN accept comment "{{ r.comment | default('') }}";
-{%   elif proto == 'icmp' %}
-    ip protocol icmp accept comment "{{ r.comment | default('') }}";
-{%   endif %}
-{% endfor %}
+    {% for r in fw_rules if r.get('chain') == 'input' %}
+      {% if r.get('from') == 'lan' %}
+    iifname $LAN accept comment "{{ r.get('comment', '') }}";
+      {% elif r.get('proto') == 'icmp' %}
+    ip protocol icmp accept comment "{{ r.get('comment', '') }}";
+    ip6 nexthdr icmpv6 accept comment "{{ r.get('comment', '') }}";
+      {% endif %}
+    {% endfor %}
   }
 
   chain forward {
     type filter hook forward priority 0;
     policy {{ firewall_cfg.policy.forward }};
     ct state established,related accept;
-{% if firewall_cfg.nat %}
+
+    {% if firewall_cfg.nat %}
     iifname $LAN oifname $WAN accept;  # allow LAN→WAN for NAT
-{% endif %}
-{% for r in fw_rules if r.get('chain') == 'forward' %}
-{%   if r.get('from') == 'lan' and r.get('to') == 'wan' %}
-    iifname $LAN oifname $WAN accept comment "{{ r.comment | default('') }}";
-{%   endif %}
-{% endfor %}
+    {% endif %}
+
+    {% for r in fw_rules if r.get('chain') == 'forward' %}
+      {% if r.get('from') == 'lan' and r.get('to') == 'wan' %}
+    iifname $LAN oifname $WAN accept comment "{{ r.get('comment', '') }}";
+      {% endif %}
+    {% endfor %}
   }
 
   chain output {
@@ -53,51 +57,12 @@ table inet filter {
   }
 }
 
-# ---------------- NAT TABLE -------------------
+# ===================== NAT TABLE =====================
 {% if firewall_cfg.nat %}
 table ip nat {
   chain postrouting {
     type nat hook postrouting priority 100;
     oifname $WAN masquerade;
-  }
-}
-{% endif %}
-
-# ---------------- DSCP (STATIC) ---------------
-{% if static %}
-table inet mangle {
-  chain prerouting {
-    type filter hook prerouting priority -200;   # after iptables raw
-
-{%   for name, cls in static.items() %}
-{%     set mark = cls.mark | default(cls.dscp | default('cs0')) %}
-{%     set m    = cls.match | default({}) %}
-    # --- {{ name }} ----------------------------
-{%     if m.get('udp_ports') %}
-    ip protocol udp udp dport { {{ ports(m['udp_ports']) }} }  counter ip dscp set {{ mark }};
-    ip protocol udp udp sport { {{ ports(m['udp_ports']) }} }  counter ip dscp set {{ mark }};
-{%     endif %}
-{%     if m.get('tcp_ports') %}
-    ip protocol tcp tcp dport { {{ ports(m['tcp_ports']) }} }  counter ip dscp set {{ mark }};
-    ip protocol tcp tcp sport { {{ ports(m['tcp_ports']) }} }  counter ip dscp set {{ mark }};
-{%     endif %}
-{%     if m.get('protocol') == 'tcp' and m.get('flags') %}
-    ip protocol tcp tcp flags {{ m['flags'] }}{% if m.get('length_lt') %} meta length < {{ m['length_lt'] }}{% endif %}  counter ip dscp set {{ mark }};
-{%     endif %}
-{%     if m.get('protocol') == 'udp' and m.get('length_lt') %}
-    ip protocol udp meta length < {{ m['length_lt'] }}  counter ip dscp set {{ mark }};
-{%     endif %}
-{%     if m.get('protocol') == 'icmp' and m.get('icmp_types') %}
-{%       for t in m['icmp_types'] %}
-    ip protocol icmp icmp type {{ t }}  counter ip dscp set {{ mark }};
-{%       endfor %}
-{%     endif %}
-{%     if m.get('ct_bytes_ge') %}
-    ct bytes ge {{ m['ct_bytes_ge'] }}  counter ip dscp set {{ mark }};
-{%     endif %}
-{%   endfor %}
-
-    counter ip dscp set cs0 comment "fallback to best-effort";
   }
 }
 {% endif %}

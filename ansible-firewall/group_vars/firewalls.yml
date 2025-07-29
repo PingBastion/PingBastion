@@ -95,7 +95,7 @@ firewall_cfg:
           tcp_ports: [53]
   
       https:
-        mark: cs1
+        mark: cs2
         match:
           tcp_ports: [443]
           udp_ports: [443]
