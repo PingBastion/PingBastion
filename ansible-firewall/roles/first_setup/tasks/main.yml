@@ -39,6 +39,7 @@
 - name: Ensure required packages are installed
   apt:
     name:
+      - conntrack 
       - netplan.io
       - nftables
       - htop
@@ -67,7 +68,6 @@
 - name: Trigger udev rules
   command: udevadm trigger
   when: not pingbastion_installed.stat.exists
-  
   
 - import_tasks: docker_install.yml
 - import_tasks: pihole.yml

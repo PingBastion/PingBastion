@@ -1,0 +1,55 @@
+- name: Ensure ipset tools are present (Ubuntu/Debian)
+  package:
+    name: ipset
+    state: present
+
+- name: Load ipset kernel modules (best-effort)
+  ansible.builtin.shell: |
+    modprobe ip_set || true
+    modprobe ip_set_hash_ip || true
+  changed_when: false
+  failed_when: false
+
+- name: Ensure ipset state dir exists
+  file:
+    path: /etc/ipset
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render ipset restore file
+  template:
+    src: ipset.conf.j2
+    dest: /etc/ipset/ipsets.restore
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply ipsets (tolerant to existing sets)
+  ansible.builtin.shell: ipset restore < /etc/ipset/ipsets.restore
+  register: ipset_restore
+  failed_when: ipset_restore.rc != 0 and
+               ('already exists' not in (ipset_restore.stderr | default('')))
+  changed_when: ipset_restore.rc == 0
+
+
+# --- Pi-hole / dnsmasq side ---
+
+- name: Ensure dnsmasq include dir exists
+  file:
+    path: /etc/dnsmasq.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install dnsmasq ipset rules (from role files/)
+  copy:
+    src: dnsmasq_urls.conf           # from roles/firewall/files/
+    dest: /etc/dnsmasq.d/99-qos-ipsets.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart DNS
+

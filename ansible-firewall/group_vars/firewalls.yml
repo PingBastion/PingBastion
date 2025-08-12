@@ -17,7 +17,7 @@ firewall_cfg:
       cidr: "172.16.0.1/24" #EXAMPLE- USE THE IP/SUBNET COMBO YOU WANT FOR YOUR LAN
 
     wan:
-      nic: &wan_if "usb1" #DEFINE HERE THE IFNAME. ALL RNDIS AND CDC ETHERNET DEVICES WILL DEFAULT TO THIS NAME, ALL QOS AND NFTABLES RULES ADJUSTED AUTOMATICALLY
+      nic: &wan_if "enp6s18" #DEFINE HERE THE IFNAME. ALL RNDIS AND CDC ETHERNET DEVICES WILL DEFAULT TO THIS NAME, ALL QOS AND NFTABLES RULES ADJUSTED AUTOMATICALLY
       method: "dhcp" # DHCP IS USED HERE CAUSE I'M DOING TETHERING/GETTING INTERNET FROM ANOTHER SOURCE/CABLE. EDIT AS NEEDED
   dhcp:
     local_domain: marano.loc
@@ -65,55 +65,215 @@ firewall_cfg:
   ##########################################################################
 
   dscp_classes:
+  
+    static:
+      # ── Highest-priority control traffic ───────────────────────────────────
+      ack_small:
+        mark: cs7
+        match:
+          protocol: tcp
+          flags: ack          # pure ACKs
+          length_lt: 128
+  
+      ping:
+        mark: ef
+        match:
+          protocol: icmp
+          icmp_types: [echo-request, echo-reply]
+  
+      udp_short:
+        mark: ef
+        match:
+          protocol: udp
+          length_lt: 1024     # sub-1 kB control frames
+  
+      # ── Application classes ────────────────────────────────────────────────
+      dns:
+        mark: cs6
+        match:
+          udp_ports: [53]
+          tcp_ports: [53]
+  
+      https:
+        mark: cs2
+        match:
+          tcp_ports: [443]
+          udp_ports: [443]
+  
+      http:
+        mark: cs1
+        match:
+          tcp_ports: [80]
+          upd_ports: [80]
 
-    # ── Highest-priority control traffic ───────────────────────────────────
-    ack_small:
-      mark: ef
-      match:
-        protocol: tcp
-        flags: ack          # pure ACKs
-        length_lt: 128
+      
+  
+      torrent:
+        mark: cs1
+        match:
+          tcp_ports: "6881-6999,51413,6969"
+          udp_ports: "6881-6999,51413,6969"
+  
+      large_flows:
+        mark: cs1
+        match:
+          ct_bytes_ge: 5000000   # ≥ 5 MB in one direction
+  
+      league_of_legends:
+        mark: cs7
+        match:
+          tcp_ports: "2099,5222-5223,8393-8400"
+          udp_ports: "5000-5500,8088,16200-16299"
+  
 
-    ping:
-      mark: ef
-      match:
-        protocol: icmp
-        icmp_types: [echo-request, echo-reply]
+    
+    #  http_connect:
+    #    mark: cs1
+    #    match: { ct_label: HTTP/Connect }       
+    #  httpproxy:
+    #    mark: cs1
+    #    match: { ct_label: HTTP/Proxy } 
+    #  http2:
+    #    mark: cs1
+    #    match: { ct_label: HTTP/2 } 
+    #  https:
+    #    mark: cs1
+    #    match: { ct_label: HTTP/S }    
+    netifyd: 
 
-    udp_short:
-      mark: ef
-      match:
-        protocol: udp
-        length_lt: 1024     # sub-1 kB control frames
+      http:
+        mark: cs1
+        match: { ct_label: HTTP }     
+      # ── Video / Music streaming ──────────────────────────────
+      youtube:
+        mark: af23
+        match: { ct_label: netify.youtube }
+  
+      netflix:
+        mark: af23
+        match: { ct_label: netify.netflix }
+      amazon_prime_video:
+        mark: af23
+        match: { ct_label: netify.amazon-prime }
+  
+      disney_plus:
+        mark: af43
+        match: { ct_label: netify.disney-plus }
+  
+      hulu:
+        mark: af33
+        match: { ct_label: netify.hulu }
 
-    # ── Application classes ────────────────────────────────────────────────
-    dns:
-      mark: cs5
-      match:
-        udp_ports: [53]
-        tcp_ports: [53]
+      # quic:
+      #   mark:  af23
+      #   match: { ct_label: QUIC }  
 
-    https:
-      mark: af33
-      match:
-        tcp_ports: [443]
+      twitch:
+        mark: af33
+        match: { ct_label: netify.twitch }
+  
+      spotify:
+        mark: af33
+        match: { ct_label: netify.spotify }
+  
+      soundcloud:
+        mark: af33
+        match: { ct_label: netify.soundcloud }
+  
+      # ── Gaming platforms / game traffic ─────────────────────
+      steam:
+        mark: cs1
+        match: { ct_label: Steam }          # numeric ID 74
+  
+      epic_games:
+        mark: cs1
+        match: { ct_label: netify.epic-games }
+  
+      xbox_live:
+        mark: cs1
+        match: { ct_label: netify.xbox-live }
+  
+      playstation_network:
+        mark: cs1
+        match: { ct_label: netify.playstation }
+  
+      nintendo_online:
+        mark:  cs1
+        match: { ct_label: Nintendo }       # numeric ID 173
 
-    http:
-      mark: af31
-      match:
-        tcp_ports: [80]
 
-    torrent:
-      mark: cs1
-      match:
-        tcp_ports: "6881-6999,51413,6969"
-        udp_ports: "6881-6999,51413,6969"
+      riot_games:
+        mark: cs7
+        match: { ct_label: Riot/Games }     # numeric ID 292
 
-    large_flows:
-      mark: af13
-      match:
-        ct_bytes_ge: 5000000   # ≥ 5 MB in one direction
-
+  
+      roblox:
+        mark: cs4
+        match: { ct_label: netify.roblox }
+  
+      # ── Cloud gaming / high-bitrate interactive ─────────────
+      geforce_now:
+        mark: cs4
+        match: { ct_label: i3D }            # numeric 289 – used by NVIDIA GFN POPs
+  
+      # ── Software / OS updates & CDNs ────────────────────────
+      windows_update:
+        mark: af13
+        match: { ct_label: netify.windows-update }
+  
+      apple_updates:
+        mark: af13
+        match: { ct_label: netify.apple-icloud }   # iCloud + macOS/iOS CDN
+  
+      ubuntu_updates:
+        mark: af13
+        match: { ct_label: netify.ubuntu }
+  
+      amazon_cloudfront:
+        mark: af13
+        match: { ct_label: netify.amazon-cloudfront }
+  
+      akamai_cdn:
+        mark: af13
+        match: { ct_label: netify.akamai }
+  
+      fastly_cdn:
+        mark: af13
+        match: { ct_label: netify.fastly }
+  
+      # ── Bulk / P2P ───────────────────────────────────────────
+      bittorrent:
+        mark: cs1
+        match: { ct_label: BitTorrent }     # numeric ID 37
+  
+      syncthing:
+        mark: cs1
+        match: { ct_label: Syncthing }      # numeric ID 312
+  
+      # ── Real-time comms / VoIP / video calls ────────────────
+      zoom:
+        mark: cs5
+        match: { ct_label: ZOOM }           # numeric ID 248
+  
+      google_meet:
+        mark: cs5
+        match: { ct_label: Google/Meet/Duo }   # numeric 245
+  
+      discord:
+        mark: cs5
+        match: { ct_label: netify.discord }
+  
+      whatsapp_call:
+        mark: cs5
+        match: { ct_label: WhatsApp/Call }  # numeric 246
+  
+      # ── Speed-test & diagnostics (optional) ─────────────────
+      ookla:
+        mark: cs1
+        match: { ct_label: OOKLA }          # numeric 191
+      deezer:
+        mark: af13          # same class as Spotify/SoundCloud
+        match: { ct_label: deezer }
 
   ##########################################################################
   # 6 ▸ CAKE  (per-interface shaping)
@@ -127,6 +287,7 @@ firewall_cfg:
       download: 100mbit              # ingress  (WAN→LAN)
       upload:   10mbit              # egress   (LAN→WAN)
       rtt: 5ms
+      interval: 5ms
       overhead: 44
       mpu: 96
       diffserv: diffserv8
@@ -137,6 +298,7 @@ firewall_cfg:
       overhead: 44
       mpu: 96    
       nic: *lan_if
+      interval: 5ms
       download: 1gbit
       upload:   1gbit
       diffserv: diffserv8

@@ -6,8 +6,16 @@
 
 # 2 ▸ Interface configuration
 - import_tasks: netplan.yml
-
+- import_tasks: dnsmasq.yml
 # 3 ▸ Firewall ruleset
+- name: Render nftables.conf
+  template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf.new 
+    owner: root
+    mode: "0644"
+
+
 - name: Render nftables.conf
   template:
     src: nftables.conf.j2
@@ -15,13 +23,13 @@
     owner: root
     mode: "0644"
     validate: "nft -c -f %s"
-  register: nft_cfg
-
 
 - name: Reload nftables rules
-  ansible.builtin.command: nft -f /etc/nftables.conf
-  when: nft_cfg.changed
-  notify: enable_nftables          # handled below
+  command: nft -f /etc/nftables.conf
+  become: true
 
 # 4 ▸ Optional QoS
 - import_tasks: qos_persist.yml  # Add this line
+
+
+# roles/firewall/handlers/main.yml

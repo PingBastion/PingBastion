@@ -1,0 +1,5 @@
+{# /etc/ipset/ipsets.restore — generated #}
+{% set timeout = firewall_cfg.ipset_timeout | default(1800) %}
+{% for name in (firewall_cfg.dscp_classes.netifyd | default({})).keys() | sort %}
+create {{ name }} hash:ip family inet counters timeout {{ timeout }} -exist
+{% endfor %}

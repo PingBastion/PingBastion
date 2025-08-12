@@ -1,0 +1,7 @@
+- name: Rebuild xt_ndpi (DKMS)
+  command: dkms build -m xt_ndpi -v {{ ndpi_version }} && dkms install -m xt_ndpi -v {{ ndpi_version }}
+
+- name: Load xt_ndpi module
+  community.general.modprobe:
+    name: xt_ndpi
+    state: present

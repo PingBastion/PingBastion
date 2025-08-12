@@ -1,7 +1,7 @@
 # Give a USB-tethering NIC a stable name (usb1)
-DRIVERS=="rndis_host|cdc_ether", \
+DRIVERS=="rndis_host|cdc_ether|ipheth|cdc_acm", \
     NAME="{{ firewall_cfg.interfaces.wan.nic }}"
 
 # Run QoS set-up script each time the usb1 interface is created
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="{{ firewall_cfg.interfaces.wan.nic }}", \
-    RUN+="/usr/local/sbin/qos-setup.sh"
+    RUN+="/usr/local/bin/qos-setup.sh"

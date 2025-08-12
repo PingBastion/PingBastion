@@ -6,3 +6,10 @@ network:
       addresses: [ "{{ lan_cidr }}" ]
     {{ wan_interface }}:
       dhcp4: true
+    usb_wan:
+      match:
+        driver: [ rndis_host, cdc_ncm, cdc_ether, ipeth, cdc_ncm ]   # cover every USB‑Ethernet gadget
+      set-name: usb1                                 # stable name instead of usb0/1/2…
+      dhcp4: true
+      dhcp6: false
+      optional: true
