@@ -1,0 +1,16 @@
+{
+{% set comma = joiner(",\n") %}
+{% for name, cfg in (firewall_cfg.dscp_classes.netifyd | default({})).items()
+     if cfg.match is defined and cfg.match.ct_label is defined and cfg.match.ct_label %}
+  {{ comma() }}"{{ name }}": {
+    "description": {{ (name | replace('_',' ') | replace('-',' ') ~ " Endpoints") | title | tojson }},
+    "type": "hash:ip",
+    "family": "inet",
+    "auto_create": true,
+    "counters": true,
+    "match": {
+      "ct_label": {{ cfg.match.ct_label | tojson }}
+    }
+  }
+{% endfor %}
+}

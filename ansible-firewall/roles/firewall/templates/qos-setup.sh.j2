@@ -1,328 +1,430 @@
-{# Minimal Jinja helpers (macros do not render output) #}
-{%- macro ports_csv(m, key) -%}
-{%- if m is mapping and (key in m) and m[key] is not none -%}
-  {%- if m[key] is string -%}{{ m[key] }}
-  {%- elif m[key] is sequence -%}{{ m[key] | join(',') }}
-  {%- else -%}{% endif -%}
-{%- else -%}{% endif -%}
-{%- endmacro -%}
+#!/usr/bin/env bash
+# qos-setup.sh — Ansible/Jinja2-rendered script to configure CAKE shaping + DSCP marking
+# - Ingress shaping via IFB, egress shaping on real NICs
+# - Static DSCP marking WITHOUT iptables/nft (uses tc u32 + pedit for IPv4)
+# - Netifyd/ipset-based DSCP marking via iptables (allowed exception)
+# - No dependency on flower dst_port (avoids parser/kernel variance)
+# - Robust rollback: on ANY error, fully reset qdiscs/filters/IFBs
+# - Always reload nftables on exit (success or failure)
+# - Systemd-friendly exit codes + optional sd_notify
+# - Verbose debug mode: set VERBOSE=1 to echo commands (set -x)
+#
+# Target: Ubuntu 24.04 (Noble)
 
-#!/bin/bash
-set -Eeuo pipefail
+set -euo pipefail
+set -o errtrace  # ensure ERR trap works inside functions
 
-# Fail fast and log a clear message for systemd/journal
-trap 'rc=$?; echo "ERROR: $(basename "$0") failed at line $LINENO with exit code $rc."; exit $rc' ERR
-trap 'rc=$?; if [[ $rc -eq 0 ]]; then echo "Completed successfully."; fi' EXIT
-
-# ----------------- tc helpers (with checksum fix) -----------------
-DSCP() {
-  case "${1,,}" in
-    cs0) echo 0;; cs1) echo 8;; af11) echo 10;; af12) echo 12;; af13) echo 14;;
-    cs2) echo 16;; af21) echo 18;; af22) echo 20;; af23) echo 22;; cs3) echo 24;;
-    af31) echo 26;; af32) echo 28;; af33) echo 30;; cs4) echo 32;; af41) echo 34;;
-    af42) echo 36;; af43) echo 38;; cs5) echo 40;; ef) echo 46;; cs6) echo 48;; cs7) echo 56;;
-    *)   echo 0;;
-  esac
-}
-
-expand_ports() {
-  local list="${1:-}" IFS=','
-  for tok in $list; do
-    if [[ "$tok" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-      local s=${BASH_REMATCH[1]} e=${BASH_REMATCH[2]}
-      for ((p=s; p<=e; p++)); do echo "$p"; done
-    else
-      [[ -n "$tok" ]] && echo "$tok"
-    fi
-  done
-}
-
-cake_handle() {
-  tc qdisc show dev "$1" | awk '/qdisc cake/ {print $3; exit}'
-}
-
-set_dscp_port_flower() {
-  local dev="$1" handle="$2" prio="$3" proto="$4" dir="$5" port="$6" dscp_dec="$7"
-  local tos=$(( dscp_dec << 2 ))
-
-  # IPv4
-  tc filter add dev "$dev" parent "$handle" protocol ip   prio "$prio" \
-    flower ip_proto "$proto" ${dir}_port "$port" skip_hw \
-    action pedit munge ip tos set "$tos" pipe \
-           csum ip4h tcp udp pipe \
-           skbedit priority "$dscp_dec" 2>/dev/null || true
-
-  # IPv6
-  tc filter add dev "$dev" parent "$handle" protocol ipv6 prio "$prio" \
-    flower ip_proto "$proto" ${dir}_port "$port" skip_hw \
-    action pedit munge ip6 traffic_class set "$tos" pipe \
-           csum tcp udp pipe \
-           skbedit priority "$dscp_dec" 2>/dev/null || true
-}
-
-set_dscp_tcpflags_flower() {
-  local dev="$1" handle="$2" prio="$3" flagsmask="$4" flagsval="$5" dscp_dec="$6"
-  local tos=$(( dscp_dec << 2 ))
-
-  tc filter add dev "$dev" parent "$handle" protocol ip   prio "$prio" \
-    flower ip_proto tcp tcp_flags "$flagsmask/$flagsval" skip_hw \
-    action pedit munge ip tos set "$tos" pipe \
-           csum ip4h tcp udp pipe \
-           skbedit priority "$dscp_dec" 2>/dev/null || true
-
-  tc filter add dev "$dev" parent "$handle" protocol ipv6 prio "$prio" \
-    flower ip_proto tcp tcp_flags "$flagsmask/$flagsval" skip_hw \
-    action pedit munge ip6 traffic_class set "$tos" pipe \
-           csum tcp udp pipe \
-           skbedit priority "$dscp_dec" 2>/dev/null || true
-}
-
-set_dscp_icmp() {
-  local dev="$1" handle="$2" prio="$3" dscp_dec="$4"
-  local tos=$(( dscp_dec << 2 ))
-
-  tc filter add dev "$dev" parent "$handle" protocol ip   prio "$prio" \
-    flower ip_proto icmp skip_hw \
-    action pedit munge ip tos set "$tos" pipe \
-           csum ip4h udp tcp pipe \
-           skbedit priority "$dscp_dec" 2>/dev/null || true
-
-  tc filter add dev "$dev" parent "$handle" protocol ipv6 prio "$prio" \
-    flower ip_proto icmpv6 skip_hw \
-    action pedit munge ip6 traffic_class set "$tos" pipe \
-           csum tcp udp pipe \
-           skbedit priority "$dscp_dec" 2>/dev/null || true
-}
-
-set_dscp_ipset_basic() {
-  local dev="$1" handle="$2" prio="$3" setname="$4" direction="$5" dscp_dec="$6"
-  local tos=$(( dscp_dec << 2 ))
-
-  # IPv4
-  tc filter add dev "$dev" parent "$handle" protocol ip   prio "$prio" \
-    basic match "ipset(${setname} ${direction})" \
-    action pedit munge ip tos set "$tos" pipe \
-           csum ip4h tcp udp pipe \
-           skbedit priority "$dscp_dec" 2>/dev/null || true
-
-  # IPv6
-  tc filter add dev "$dev" parent "$handle" protocol ipv6 prio "$prio" \
-    basic match "ipset(${setname} ${direction})" \
-    action pedit munge ip6 traffic_class set "$tos" pipe \
-           csum tcp udp pipe \
-           skbedit priority "$dscp_dec" 2>/dev/null || true
-}
-
-apply_static_class() {
-  local dev="$1" handle="$2" name="$3" phb="$4" tcp_ports="$5" udp_ports="$6" proto="$7" flags="$8" length_lt="$9" icmp_types="${10}"
-  local dscp_dec; dscp_dec="$(DSCP "$phb")"
-  local prio_base=10
-
-  # length_lt and ct_bytes_ge are not expressed here.
-
-  if [[ -n "${tcp_ports}" ]]; then
-    while read -r p; do
-      set_dscp_port_flower "$dev" "$handle" $((prio_base+0)) tcp sport "$p" "$dscp_dec"
-      set_dscp_port_flower "$dev" "$handle" $((prio_base+0)) tcp dport "$p" "$dscp_dec"
-    done < <(expand_ports "$tcp_ports")
-  fi
-
-  if [[ -n "${udp_ports}" ]]; then
-    while read -r p; do
-      set_dscp_port_flower "$dev" "$handle" $((prio_base+1)) udp sport "$p" "$dscp_dec"
-      set_dscp_port_flower "$dev" "$handle" $((prio_base+1)) udp dport "$p" "$dscp_dec"
-    done < <(expand_ports "$udp_ports")
-  fi
-
-  if [[ "$proto" == "tcp" && "$flags" == "ack" ]]; then
-    set_dscp_tcpflags_flower "$dev" "$handle" $((prio_base+2)) 0x10 0x10 "$dscp_dec"
-  fi
-
-  if [[ "$proto" == "icmp" && -n "$icmp_types" ]]; then
-    set_dscp_icmp "$dev" "$handle" $((prio_base+4)) "$dscp_dec"
-  fi
-}
-
-apply_netify_ipset() {
-  local dev="$1" handle="$2" setname="$3" phb="$4"
-  local dscp_dec; dscp_dec="$(DSCP "$phb")"
-  local prio=20
-
-  set_dscp_ipset_basic "$dev" "$handle" "$prio" "$setname" src "$dscp_dec"
-  set_dscp_ipset_basic "$dev" "$handle" "$prio" "$setname" dst "$dscp_dec"
-}
-
-# ----------------- CLI args -----------------
-usage() {
-  cat <<'USAGE'
-Usage: $0 [OPTIONS]
-
-Options:
-  -c, --cleanup   Remove all qdiscs and IFB devices, then exit (do not reapply CAKE/filters)
-  -h, --help      Show this help and exit
-USAGE
-}
-
-CLEANUP_ONLY=0
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -c|--cleanup) CLEANUP_ONLY=1; shift ;;
-    -h|--help)    usage; exit 0 ;;
-    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
-  esac
-done
-
-# ----------------- Config (Ansible / Jinja) -----------------
-WAN="{{ firewall_cfg.interfaces.wan.nic }}"
-LAN="{{ firewall_cfg.interfaces.lan.nic }}"
-IFB_WAN="{{ firewall_cfg.cake.wan.ifb | default('ifb_' ~ firewall_cfg.interfaces.wan.nic) }}"
-
-UP_RATE="{{ firewall_cfg.cake.wan.up   | default('10mbit') }}"
-DOWN_RATE="{{ firewall_cfg.cake.wan.down | default('100mbit') }}"
-
-CAKE_OPTS_UPLOAD="{{ firewall_cfg.cake.wan.extra | default('diffserv8 nowash triple-isolate nat ack-filter-aggressive split-gso rtt 5ms overhead 44 mpu 96') }}"
-CAKE_OPTS_DOWNLOAD="{{ firewall_cfg.cake.wan.extra | default('diffserv8 nowash triple-isolate nat ack-filter-aggressive split-gso rtt 5ms overhead 44 mpu 96') }}"
-
-NFT_CONF="{{ firewall_cfg.nftables.conf_path | default('/etc/nftables.conf') }}"
-
-# ----------------- Enable TCP BBR -----------------
-echo "Enabling TCP BBR congestion control..."
-if ! lsmod | awk '{print $1}' | grep -qw tcp_bbr; then
-  modprobe tcp_bbr 2>/dev/null || true
-fi
-sysctl -q -w net.core.default_qdisc=fq
-sysctl -q -w net.ipv4.tcp_congestion_control=bbr || \
-  echo "Warning: could not set net.ipv4.tcp_congestion_control=bbr (kernel may not support it)."
-echo
-
-# ----------------- Cleanup -----------------
-cleanup() {
-  echo "Cleaning up existing qdiscs and IFB devices..."
-
-  mapfile -t _ifbs < <(ip -o link show type ifb 2>/dev/null | awk -F': ' '{print $2}')
-  for d in "${_ifbs[@]:-}"; do
-    ip link set dev "$d" down   2>/dev/null || true
-    ip link delete "$d" type ifb 2>/dev/null || true
-  done
-
-  for dev in $(ls /sys/class/net); do
-    tc qdisc del dev "$dev" root    2>/dev/null || true
-    tc qdisc del dev "$dev" ingress 2>/dev/null || true
-  done
-  echo "All qdiscs reset; IFBs removed."
-}
-cleanup
-
-if (( CLEANUP_ONLY )); then
-  echo "Cleanup requested; exiting without reapplying rules."
-  exit 0
+# Verbose command tracing if VERBOSE=1
+if [[ "${VERBOSE:-0}" == "1" ]]; then
+  export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
+  set -x
 fi
 
-# ----------------- IFB creation -----------------
-echo "Creating IFB $IFB_WAN for WAN ingress..."
-modprobe ifb 2>/dev/null || true
-ip link set dev "$IFB_WAN" down 2>/dev/null || true
-ip link delete "$IFB_WAN" type ifb 2>/dev/null || true
-ip link add "$IFB_WAN" type ifb 2>/dev/null || true
-ip link set dev "$IFB_WAN" up
+PATH=/usr/sbin:/sbin:/usr/bin:/bin
 
-# ----------------- Helpers -----------------
-flush_qdisc() {
-  local DEV="$1"
-  tc qdisc del dev "$DEV" root    2>/dev/null || true
-  tc qdisc del dev "$DEV" ingress 2>/dev/null || true
-}
-
-# ----------------- CAKE setup (WAN egress + IFB ingress) -----------------
-echo "Applying CAKE on WAN ($WAN) and IFB ($IFB_WAN)..."
-flush_qdisc "$WAN"
-
-# Upload shaping on WAN egress
-tc qdisc add dev "$WAN" root cake \
-  bandwidth "$UP_RATE" $CAKE_OPTS_UPLOAD
-
-# Mirror WAN ingress to IFB for download shaping
-modprobe sch_ingress 2>/dev/null || true
-tc qdisc replace dev "$WAN" handle ffff: ingress 2>/dev/null || true
-tc filter replace dev "$WAN" parent ffff: protocol all prio 10 u32 \
-  match u32 0 0 \
-  action mirred egress redirect dev "$IFB_WAN"
-
-# Download shaping on IFB
-tc qdisc add dev "$IFB_WAN" root cake \
-  bandwidth "$DOWN_RATE" $CAKE_OPTS_DOWNLOAD
-
-# ----------------- LAN cleanup (no shaping) -----------------
-flush_qdisc "$LAN"
-
-# ----------------- Reload nftables firewall (not DSCP) -----------------
-if [ -f "$NFT_CONF" ]; then
-  echo "Reloading nftables firewall rules from $NFT_CONF..."
-  if nft --check -f "$NFT_CONF"; then
-    nft -f "$NFT_CONF"
-  else
-    echo "ERROR: nftables config check failed; not applying."
-    exit 1
-  fi
-fi
-
-echo "Device / qdisc setup complete."
-
-# ----------------- Part 2: DSCP marking for static classes -----------------
-WAN_HANDLE="$(cake_handle "$WAN" || true)"
-IFB_HANDLE="$(cake_handle "$IFB_WAN" || true)"
-
-if [[ -z "$WAN_HANDLE" || -z "$IFB_HANDLE" ]]; then
-  echo "ERROR: could not auto-detect CAKE handles on $WAN / $IFB_WAN."
-  tc qdisc show dev "$WAN" || true
-  tc qdisc show dev "$IFB_WAN" || true
+# ----- Sanity: root only -----
+if [[ ${EUID} -ne 0 ]]; then
+  echo "[QoS] ERROR: must run as root" >&2
   exit 1
 fi
 
-# Clear existing DSCP filters on CAKE roots
-tc filter del dev "$WAN"     parent "$WAN_HANDLE" 2>/dev/null || true
-tc filter del dev "$IFB_WAN" parent "$IFB_HANDLE" 2>/dev/null || true
+# Optional: sd_notify integration for Type=notify units
+notify_status() { if [[ -n "${NOTIFY_SOCKET-}" ]] && command -v systemd-notify >/dev/null; then systemd-notify --status="$*"; fi; }
+notify_ready()  { if [[ -n "${NOTIFY_SOCKET-}" ]] && command -v systemd-notify >/dev/null; then systemd-notify --ready; fi; }
 
-echo "Applying tc DSCP classification (static)..."
+log()  { echo "[QoS] $*"; }
+warn() { echo "[QoS] WARN: $*" >&2; }
+die()  { echo "[QoS] ERROR: $*" >&2; exit 1; }
 
-{% set dscp_classes = firewall_cfg.dscp_classes | default({}) %}
-{% set static = dscp_classes.static | default({}) %}
-{% for name, cls in static.items() %}
-{% set phb = (cls.mark | default(cls.dscp | default('cs0'))) %}
-{% set m = cls.match | default({}) %}
-{% set tcp_ports_csv = ports_csv(m, 'tcp_ports') %}
-{% set udp_ports_csv = ports_csv(m, 'udp_ports') %}
-{% set icmpt = m.get('icmp_types') %}
-{% set icmp_types_csv = (icmpt | join(',')) if icmpt else '' %}
+# ---------------- JINJA VARIABLES ----------------
+# IFB device names based on NICs
+{% set ifb_wan = "ifb_" ~ firewall_cfg.cake.wan.nic %}
+{% set ifb_lan = "ifb_" ~ firewall_cfg.cake.lan.nic %}
 
-# {{ name }}
-apply_static_class "$WAN"     "$WAN_HANDLE" "{{ name }}" "{{ phb }}" \
-  "{{ tcp_ports_csv }}" "{{ udp_ports_csv }}" \
-  "{{ m.get('protocol','') }}" "{{ m.get('flags','') }}" "{{ m.get('length_lt','') }}" \
-  "{{ icmp_types_csv }}"
+# DSCP name -> codepoint map (0..63)
+{% set dscp_map = {
+  'CS0':0,'CS1':8,'CS2':16,'CS3':24,'CS4':32,'CS5':40,'CS6':48,'CS7':56,
+  'AF11':10,'AF12':12,'AF13':14,'AF21':18,'AF22':20,'AF23':22,
+  'AF31':26,'AF32':28,'AF33':30,'AF41':34,'AF42':36,'AF43':38,
+  'EF':46,'LE':1
+} %}
 
-apply_static_class "$IFB_WAN" "$IFB_HANDLE" "{{ name }}" "{{ phb }}" \
-  "{{ tcp_ports_csv }}" "{{ udp_ports_csv }}" \
-  "{{ m.get('protocol','') }}" "{{ m.get('flags','') }}" "{{ m.get('length_lt','') }}" \
-  "{{ icmp_types_csv }}"
+WAN_IF="{{ firewall_cfg.cake.wan.nic }}"
+LAN_IF="{{ firewall_cfg.cake.lan.nic }}"
+IFB_WAN="{{ ifb_wan }}"
+IFB_LAN="{{ ifb_lan }}"
+
+# ---- Debug: print core config ----
+log "Config: WAN_IF=$WAN_IF LAN_IF=$LAN_IF IFB_WAN=$IFB_WAN IFB_LAN=$IFB_LAN"
+
+# -------------- Cleanup & rollback --------------
+CLEANED=0
+cleanup_state() {
+  [[ $CLEANED -eq 1 ]] && return 0
+  log "Rollback: resetting qdiscs/filters and IFBs"
+  for iface in "$WAN_IF" "$LAN_IF" "$IFB_WAN" "$IFB_LAN"; do
+    tc qdisc del dev "$iface" root 2>/dev/null || true
+    tc qdisc del dev "$iface" ingress 2>/dev/null || true
+  done
+  ip link del "$IFB_WAN" 2>/dev/null || true
+  ip link del "$IFB_LAN" 2>/dev/null || true
+  if iptables -t mangle -S QOS_NETIFY_DSCP >/dev/null 2>&1; then
+    iptables -t mangle -F QOS_NETIFY_DSCP || true
+  fi
+  CLEANED=1
+}
+
+# ----- TTL/HopLimit normalization via nftables (ADDED) -----
+ensure_nft_ttl_rules() {
+  if ! command -v nft >/dev/null 2>&1; then
+    warn "nft not found; skipping TTL/HopLimit normalization"
+    return 0
+  fi
+  local TBL="tetherttl" CH="post"
+  nft list table inet "$TBL" >/dev/null 2>&1 || nft add table inet "$TBL"
+  nft list chain inet "$TBL" "$CH" >/dev/null 2>&1 || \
+    nft add chain inet "$TBL" "$CH" '{ type filter hook postrouting priority mangle; policy accept; }'
+  nft list chain inet "$TBL" "$CH" 2>/dev/null | grep -q "oifname \"$WAN_IF\" ip ttl set 65" || \
+    nft add rule inet "$TBL" "$CH" oifname "$WAN_IF" ip ttl set 65
+  nft list chain inet "$TBL" "$CH" 2>/dev/null | grep -q "oifname \"$WAN_IF\" ip6 hoplimit set 65" || \
+    nft add rule inet "$TBL" "$CH" oifname "$WAN_IF" ip6 hoplimit set 65
+  log "Ensured nft TTL/HopLimit normalization on oif=$WAN_IF"
+}
+
+reload_nftables() {
+  # Reload nftables ruleset; this may flush iptables-nft chains, so call with care.
+  log "Reloading nftables ruleset"
+  if systemctl list-unit-files | awk '{print $1}' | grep -qx nftables.service; then
+    if ! systemctl reload nftables 2>/dev/null; then
+      warn "nftables reload via systemd failed"
+    fi
+  elif command -v nft >/dev/null && [[ -f /etc/nftables.conf ]]; then
+    if ! nft -f /etc/nftables.conf 2>/dev/null; then
+      warn "nftables reload via /etc/nftables.conf failed"
+    fi
+  else
+    warn "nftables not found; skipping reload"
+  fi
+  # ADDED: always reload ipsets after any nftables reload
+  if command -v ipset >/dev/null 2>&1 && [[ -r /etc/ipset/ipsets.restore ]]; then
+    log "Reloading ipsets from /etc/ipset/ipsets.restore"
+    ipset restore < /etc/ipset/ipsets.restore || warn "ipset restore failed"
+  else
+    warn "ipset restore file not found or ipset missing; skipping"
+  fi
+}
+
+on_err() {
+  local ec=$?
+  # BASH_COMMAND is the command that failed; BASH_LINENO[0] is its line number
+  warn "Encountered an error (exit $ec) at ${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?} while running: ${BASH_COMMAND:-?}"
+  cleanup_state
+  reload_nftables
+  exit $ec
+}
+
+on_exit() {
+  # Only reload nftables at end if explicitly allowed (or on legacy backend)
+  if (( RELOAD_AT_END )); then
+    reload_nftables
+  else
+    log "Skipping nftables reload at end (iptables backend: $IPT_BACKEND)"
+  fi
+}
+
+trap on_err ERR
+trap on_exit EXIT
+
+# Detect iptables backend (legacy vs nft)
+IPT_BACKEND="legacy"
+if iptables -V 2>&1 | grep -qi 'nf_tables'; then IPT_BACKEND="nft"; fi
+# Control whether we reload nftables at the very end on success
+# - For iptables-nft backend, reloading at end will wipe iptables chains; default to skip.
+RELOAD_AT_END=${RELOAD_NFT_ON_SUCCESS:-1}
+if [[ "$IPT_BACKEND" == nft ]]; then RELOAD_AT_END={RELOAD_NFT_ON_SUCCESS:-0}; fi
+
+# ---- Debug: print backend + versions ----
+log "iptables backend: $IPT_BACKEND ; RELOAD_AT_END=$RELOAD_AT_END"
+{ tc -V 2>/dev/null | head -1 | sed 's/^/iproute2: /' || true; } | while read -r l; do log "$l"; done
+{ iptables -V 2>/dev/null | head -1 | sed 's/^/iptables: /' || true; } | while read -r l; do log "$l"; done
+{ ipset -v 2>/dev/null | head -1 | sed 's/^/ipset: /' || true; } | while read -r l; do log "$l"; done
+
+# ----- Parse CLI options -----
+CLEAN_ONLY=0
+while getopts ":c" opt; do
+  case "$opt" in
+    c) CLEAN_ONLY=1 ;;
+    \?) die "Invalid option: -$OPTARG" ;;
+  esac
+done
+
+# ----- Cleanup-only short-circuit -----
+if (( CLEAN_ONLY )); then
+  log "Cleanup mode (-c): removing all QoS qdiscs/IFBs and flushing iptables mangle chain, then reloading nftables"
+  cleanup_state
+  reload_nftables
+  # prevent on_exit from reloading a second time
+  trap - EXIT
+  exit 0
+fi
+
+# -------------- Load kernel modules --------------
+log "Init: loading kernel modules"
+modprobe ifb || true
+modprobe sch_ingress || true
+modprobe sch_cake || true
+modprobe act_mirred || true
+modprobe act_pedit || true
+modprobe cls_matchall || true
+# ADDED: enable BBR congestion control
+modprobe tcp_bbr || true
+sysctl -w net.ipv4.tcp_congestion_control=bbr || warn "Failed to set tcp_congestion_control to bbr"
+
+# -------------- pedit capability detection --------------
+# Prefer extended pedit (ex + retain). Fallback to classic 'ip tos ... mask'.
+PEDIT_MODE="ex"  # ex|classic
+log "Probing tc pedit syntax"
+# Scratch qdisc on lo
+tc qdisc add dev lo handle ffff: ingress 2>/dev/null || true
+if tc filter add dev lo ingress protocol ip u32 match u32 0 0 \
+    action pedit ex munge ip dsfield set 0xb8 retain 0xfc action gact pass 2>/dev/null; then
+  tc filter del dev lo ingress 2>/dev/null || true
+  log "Using pedit: extended (ex/retain)"
+else
+  tc filter del dev lo ingress 2>/dev/null || true
+  if tc filter add dev lo ingress protocol ip u32 match u32 0 0 \
+      action pedit munge ip tos set 0xb8 mask 0xfc action gact pass 2>/dev/null; then
+    PEDIT_MODE="classic"
+    tc filter del dev lo ingress 2>/dev/null || true
+    log "Using pedit: classic (tos/mask)"
+  else
+    die "Neither pedit extended nor classic syntax works on this system"
+  fi
+fi
+# remove scratch qdisc
+tc qdisc del dev lo ingress 2>/dev/null || true
+
+# helpers to emit the right pedit action
+pedit_set_dscp_v4() {
+  local tos_hex="$1"
+  if [[ "$PEDIT_MODE" == ex ]]; then
+    # Preserve ECN (0x03), overwrite DSCP bits with tos_hex (which already has DSCP<<2)
+    echo "action pedit ex munge ip dsfield set $tos_hex retain 0x03"
+  else
+    # Classic pedit: use mask 0xfc to touch only DSCP bits
+    echo "action pedit munge ip tos set $tos_hex mask 0xfc"
+  fi
+}
+
+# Expand port tokens: supports "80", "80,443", "6881:6999", and mixed lists
+expand_port_tokens() {
+  local out=()
+  local token t start end p
+  for token in "$@"; do
+    IFS=',' read -ra parts <<< "$token"
+    for t in "${parts[@]}"; do
+      if [[ "$t" =~ ^([0-9]{1,5}):([0-9]{1,5})$ ]]; then
+        start=${BASH_REMATCH[1]}; end=${BASH_REMATCH[2]}
+        if (( start>=1 && end<=65535 && start<=end )); then
+          # Guard against very large expansions (>4096 ports)
+          if (( end - start > 4096 )); then
+            warn "Skipping oversized port range $t (>4096 ports)"
+            continue
+          fi
+          for ((p=start; p<=end; p++)); do out+=("$p"); done
+        else
+          warn "Invalid port range token: $t"
+        fi
+      elif [[ "$t" =~ ^[0-9]{1,5}$ ]]; then
+        if (( t>=1 && t<=65535 )); then out+=("$t"); else warn "Invalid port $t"; fi
+      elif [[ -n "$t" ]]; then
+        warn "Unrecognized port token: $t"
+      fi
+    done
+  done
+  printf '%s\n' "${out[@]}"
+}
+
+# -------------- Start fresh: clean any prior state --------------
+log "Cleaning existing qdiscs and IFB devices"
+for iface in "$WAN_IF" "$LAN_IF" "$IFB_WAN" "$IFB_LAN"; do
+  tc qdisc del dev "$iface" root 2>/dev/null || true
+  tc qdisc del dev "$iface" ingress 2>/dev/null || true
+done
+ip link del "$IFB_WAN" 2>/dev/null || true
+ip link del "$IFB_LAN" 2>/dev/null || true
+
+# -------------- Create IFBs --------------
+log "Creating IFB devices"
+ip link add "$IFB_WAN" type ifb
+ip link add "$IFB_LAN" type ifb
+ip link set "$IFB_WAN" up
+ip link set "$IFB_LAN" up
+
+# Optional: disable offloads for tighter rate control (commented)
+# for dev in "$WAN_IF" "$LAN_IF"; do
+#   ethtool -K "$dev" gro off gso off tso off lro off 2>/dev/null || true
+# done
+
+# -------------- Apply CAKE qdiscs --------------
+log "Applying CAKE qdiscs"
+# WAN egress / WAN ingress
+tc qdisc add dev "$WAN_IF" root cake \
+  bandwidth {{ firewall_cfg.cake.wan.upload }} \
+  rtt {{ firewall_cfg.cake.wan.rtt }} \
+  diffserv {{ firewall_cfg.cake.wan.diffserv }} \
+  {{ firewall_cfg.cake.wan.extra_opts|default("") }}
+
+tc qdisc add dev "$IFB_WAN" root cake \
+  bandwidth {{ firewall_cfg.cake.wan.download }} \
+  rtt {{ firewall_cfg.cake.wan.rtt }} \
+  diffserv {{ firewall_cfg.cake.wan.diffserv }} \
+  {{ firewall_cfg.cake.wan.extra_opts|default("") }}
+
+# LAN egress / LAN ingress
+tc qdisc add dev "$LAN_IF" root cake \
+  bandwidth {{ firewall_cfg.cake.lan.upload }} \
+  rtt {{ firewall_cfg.cake.lan.rtt }} \
+  diffserv {{ firewall_cfg.cake.lan.diffserv }} \
+  {{ firewall_cfg.cake.lan.extra_opts|default("") }}
+
+tc qdisc add dev "$IFB_LAN" root cake \
+  bandwidth {{ firewall_cfg.cake.lan.download }} \
+  rtt {{ firewall_cfg.cake.lan.rtt }} \
+  diffserv {{ firewall_cfg.cake.lan.diffserv }} \
+  {{ firewall_cfg.cake.lan.extra_opts|default("") }}
+
+# -------------- ADDED: Apply nft TTL/HopLimit rules now --------------
+{% if is_tethering is defined|default(false) %} 
+log "Applying nft TTL/HopLimit normalization"
+ensure_nft_ttl_rules
+{% endif %}
+# -------------- Static DSCP marking (IPv4) --------------
+# -------------- Ensure ingress qdisc exists on real NICs BEFORE adding any filters --------------
+ensure_ingress() {
+  local dev="$1"
+  if ! tc qdisc show dev "$dev" | grep -q "ingress ffff:"; then
+    log "Adding ingress qdisc on $dev"
+    tc qdisc add dev "$dev" handle ffff: ingress
+  else
+    log "Ingress qdisc already present on $dev"
+  fi
+}
+
+log "Ensuring ingress qdisc on WAN/LAN"
+ensure_ingress "$WAN_IF"
+ensure_ingress "$LAN_IF"
+
+# -------------- Static DSCP marking (IPv4) --------------
+log "Applying static DSCP markings (IPv4 via u32+pedit)"
+# Helper: add u32 match for proto/port with DSCP set + redirect
+#   $1=dev $2=proto_num(6|17) $3=port $4=tos_hex $5=ifb
+add_mark_redirect_v4() {
+  local dev="$1" proto_num="$2" port="$3" tos_hex="$4" ifb="$5"
+  log "tc u32 rule: dev=$dev proto=$proto_num dport=$port tos=$tos_hex -> ifb=$ifb"
+  # shellcheck disable=SC2046
+  tc filter add dev "$dev" ingress pref 10 protocol ip u32 \
+    match ip protocol "$proto_num" 0xff \
+    match ip dport "$port" 0xffff \
+    $(pedit_set_dscp_v4 "$tos_hex") \
+    action mirred egress redirect dev "$ifb"
+}
+
+{% for class_name, rule in firewall_cfg.dscp_classes.static.items() %}
+{
+  echo "DSCP Marking for {{ class_name }} as {{ rule.mark }}"
+  {% set mark_upper = (rule.mark|string).upper() %}
+  {% set dscp_code = (dscp_map[mark_upper] if (mark_upper in dscp_map) else (rule.mark|int)) %}
+  {% set tos_hex = '0x%02x' % ((dscp_code|int) * 4) %}
+  # WAN & LAN for TCP
+  {% if rule.match.tcp_ports is defined %}
+  {% set tcp_list = (rule.match.tcp_ports if rule.match.tcp_ports is string else rule.match.tcp_ports | join(' ')) %}
+  while IFS= read -r port; do
+    add_mark_redirect_v4 "$WAN_IF" 6 "$port" {{ tos_hex }} "$IFB_WAN"
+    add_mark_redirect_v4 "$LAN_IF" 6 "$port" {{ tos_hex }} "$IFB_LAN"
+  done < <(expand_port_tokens {{ tcp_list }})
+  {% endif %}
+  # WAN & LAN for UDP
+  {% if rule.match.udp_ports is defined %}
+  {% set udp_list = (rule.match.udp_ports if rule.match.udp_ports is string else rule.match.udp_ports | join(' ')) %}
+  while IFS= read -r port; do
+    add_mark_redirect_v4 "$WAN_IF" 17 "$port" {{ tos_hex }} "$IFB_WAN"
+    add_mark_redirect_v4 "$LAN_IF" 17 "$port" {{ tos_hex }} "$IFB_LAN"
+  done < <(expand_port_tokens {{ udp_list }})
+  {% endif %}
+}
 {% endfor %}
 
-echo "Static DSCP rules installed."
+# -------------- Attach ingress & catch-all redirect LAST --------------
+# We attach catch-all only after all specific rules succeed, to avoid black-holing traffic on partial failures.
+redirect_ingress_catchall() {
+  local real_if="$1"; local ifb_if="$2"
+  ensure_ingress "$real_if"
+  tc filter add dev "$real_if" ingress pref 1000 matchall \
+    action mirred egress redirect dev "$ifb_if" 2>/dev/null || true
+}
 
-# ----------------- Part 3: DSCP marking for netifyd/ipset -----------------
-echo "Applying tc DSCP classification (netifyd/ipset)..."
+log "Adding catch-all ingress redirect to IFBs"
+redirect_ingress_catchall "$WAN_IF" "$IFB_WAN"
+redirect_ingress_catchall "$LAN_IF" "$IFB_LAN"
 
-{% set dscp_classes = firewall_cfg.dscp_classes | default({}) %}
-{% set netifyd = dscp_classes.netifyd | default({}) %}
-{% for name, cls in netifyd.items() %}
-{% set phb = (cls.mark | default(cls.dscp | default('cs0'))) %}
+# -------------- Netifyd DSCP via ipset + iptables --------------
+# If using iptables-nft backend, reload nftables BEFORE adding the iptables chains,
+# otherwise a later reload would delete them.
+if [[ "$IPT_BACKEND" == nft ]]; then
+  log "Pre-reloading nftables (iptables backend is nft)"
+  reload_nftables
+fi
 
-# {{ name }}
-apply_netify_ipset "$WAN"     "$WAN_HANDLE" "{{ name }}" "{{ phb }}"
-apply_netify_ipset "$IFB_WAN" "$IFB_HANDLE" "{{ name }}" "{{ phb }}"
+log "Applying Netifyd DSCP via ipset/iptables (IPv4)"
+# ---- Debug: chain existence before create ----
+if iptables -t mangle -S QOS_NETIFY_DSCP >/dev/null 2>&1; then
+  log "QOS_NETIFY_DSCP already exists prior to create"
+else
+  log "QOS_NETIFY_DSCP does not exist; will create"
+fi
+iptables -t mangle -N QOS_NETIFY_DSCP 2>/dev/null || iptables -t mangle -F QOS_NETIFY_DSCP
+iptables -t mangle -C PREROUTING -j QOS_NETIFY_DSCP 2>/dev/null || iptables -t mangle -A PREROUTING -j QOS_NETIFY_DSCP
+
+# Allow configurable ipset prefix to match your Netify plugin names.
+# Example: set firewall_cfg.netifyd.ipset_prefix to "netify_" or "" (default) to align with /etc/netifyd/plugins.d/ipset.json keys.
+{% set ipset_prefix = firewall_cfg.netifyd.ipset_prefix|default('') %}
+
+{% for class_name, rule in firewall_cfg.dscp_classes.netifyd.items() %}
+# Derive ipset name (allow per-rule override with rule.ipset_name)
+{% set ipset_name = rule.ipset_name|default(ipset_prefix ~ class_name) %}
+# Add rule using numeric DSCP (0..63)
+{% set mark_upper = (rule.mark|string).upper() %}
+{% set dscp_num = (dscp_map[mark_upper] if (mark_upper in dscp_map) else (rule.mark|int)) %}
+# ---- Debug: show mapping ----
+log "Netify class '{{ class_name }}' -> ipset '{{ ipset_name }}' ; DSCP '{{ dscp_num }}'"
+log "Checking existing ipset '{{ ipset_name }}'"
+if ipset list -n {{ ipset_name }} >/dev/null 2>&1; then
+  log "ipset '{{ ipset_name }}' exists; skipping create"
+else
+  log "Creating ipset '{{ ipset_name }}' (hash:ip family inet counters timeout 3600)"
+  if ! ipset create {{ ipset_name }} hash:ip family inet counters timeout 3600; then
+    warn "ipset create for '{{ ipset_name }}' failed (already exists or option mismatch). Continuing."
+  fi
+fi
+# Match both directions so LAN->WAN (dst match) and WAN->LAN (src match) get marked
+iptables -t mangle -A QOS_NETIFY_DSCP -m set --match-set {{ ipset_name }} src -j DSCP --set-dscp {{ dscp_num }}
+iptables -t mangle -A QOS_NETIFY_DSCP -m set --match-set {{ ipset_name }} dst -j DSCP --set-dscp {{ dscp_num }}
 {% endfor %}
 
-echo "Netifyd DSCP rules installed."
+# IPv6 Netify path (optional - requires inet6 ipsets and ip6tables rules)
+{% if firewall_cfg.ipv6_netify|default(false) %}
+log "Applying Netifyd DSCP via ipset/ip6tables (IPv6)"
+ip6tables -t mangle -N QOS_NETIFY6_DSCP 2>/dev/null || ip6tables -t mangle -F QOS_NETIFY6_DSCP
+ip6tables -t mangle -C PREROUTING -j QOS_NETIFY6_DSCP 2>/dev/null || ip6tables -t mangle -A PREROUTING -j QOS_NETIFY6_DSCP
+{% for class_name, rule in firewall_cfg.dscp_classes.netifyd.items() %}
+# ipset create -exist netify6_{{ class_name }} hash:ip family inet6 timeout 3600
+{% set mark_upper = (rule.mark|string).upper() %}
+{% set dscp_num = (dscp_map[mark_upper] if (mark_upper in dscp_map) else (rule.mark|int)) %}
+ip6tables -t mangle -A QOS_NETIFY6_DSCP -m set --match-set netify6_{{ class_name }} src -j DSCP --set-dscp {{ dscp_num }}
+{% endfor %}
+{% endif %}
 
-# Explicit success exit (also logged by EXIT trap)
+notify_ready
+log "Done."
 exit 0

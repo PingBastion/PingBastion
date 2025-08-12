@@ -69,7 +69,6 @@
   command: udevadm trigger
   when: not birdwall_installed.stat.exists
   
-- import_tasks: ndpi.yml  
 - import_tasks: docker_install.yml
 - import_tasks: pihole.yml
 - import_tasks: banner.yml

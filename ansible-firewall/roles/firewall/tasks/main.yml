@@ -6,8 +6,7 @@
 
 # 2 ▸ Interface configuration
 - import_tasks: netplan.yml
-#- import_tasks: connlabel.yml
-- import_tasks: netifyd.yml
+- import_tasks: dnsmasq.yml
 # 3 ▸ Firewall ruleset
 - name: Render nftables.conf
   template:
@@ -16,19 +15,6 @@
     owner: root
     mode: "0644"
 
-#- name: Deploy iptables-nft DSCP rules (highest precedence)
-#  template:
-#    src: iptables_dscp.rules.j2
-#    dest: /etc/iptables/10-dscp.rules.new
-#    mode: '0644'
-#  become: true
-
-#- name: Deploy iptables-nft DSCP rules (highest precedence)
-#  template:
-#    src: iptables_dscp.rules.j2
-#    dest: /etc/iptables/10-dscp.rules
-#    mode: '0644'
-#  become: true
 
 - name: Render nftables.conf
   template:
@@ -37,11 +23,6 @@
     owner: root
     mode: "0644"
     validate: "nft -c -f %s"
-
-
-#- name: Restore iptables-nft
-#  command: iptables-nft-restore /etc/iptables/10-dscp.rules
-#  become: true
 
 - name: Reload nftables rules
   command: nft -f /etc/nftables.conf

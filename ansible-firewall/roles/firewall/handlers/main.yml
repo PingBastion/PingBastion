@@ -25,6 +25,39 @@
   become: true
   ansible.builtin.command: netfilter-persistent reload ipset
 
+
+# Restart Pi-hole FTL if present
+- name: Restart Pi-hole FTL
+  listen: "Restart DNS"
+  ansible.builtin.service:
+    name: pihole-FTL
+    state: restarted
+  when: "'pihole-FTL.service' in ansible_facts.services"
+
+# Otherwise restart plain dnsmasq if present
+- name: Restart dnsmasq
+  listen: "Restart DNS"
+  ansible.builtin.service:
+    name: dnsmasq
+    state: restarted
+  when: "'dnsmasq.service' in ansible_facts.services"
+
+# Optional: reload nftables when needed (use notify: "Reload nftables")
+- name: Reload nftables (service)
+  listen: "Reload nftables"
+  ansible.builtin.service:
+    name: nftables
+    state: reloaded
+  when: "'nftables.service' in ansible_facts.services"
+
+# Optional fallback if the nftables service isn't present
+- name: Reload nftables (fallback command)
+  listen: "Reload nftables"
+  ansible.builtin.command: nft -f /etc/nftables.conf
+  changed_when: false
+  failed_when: false
+  when: "'nftables.service' not in ansible_facts.services"
+
   ###########################################################################
 # Flush handlers *now* (they run asynchronously) then exit the play safely
 ###########################################################################

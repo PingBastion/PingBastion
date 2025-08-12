@@ -17,7 +17,7 @@ firewall_cfg:
       cidr: "172.16.0.1/24" #EXAMPLE- USE THE IP/SUBNET COMBO YOU WANT FOR YOUR LAN
 
     wan:
-      nic: &wan_if "usb1" #DEFINE HERE THE IFNAME. ALL RNDIS AND CDC ETHERNET DEVICES WILL DEFAULT TO THIS NAME, ALL QOS AND NFTABLES RULES ADJUSTED AUTOMATICALLY
+      nic: &wan_if "enp6s18" #DEFINE HERE THE IFNAME. ALL RNDIS AND CDC ETHERNET DEVICES WILL DEFAULT TO THIS NAME, ALL QOS AND NFTABLES RULES ADJUSTED AUTOMATICALLY
       method: "dhcp" # DHCP IS USED HERE CAUSE I'M DOING TETHERING/GETTING INTERNET FROM ANOTHER SOURCE/CABLE. EDIT AS NEEDED
   dhcp:
     local_domain: marano.loc
@@ -125,7 +125,6 @@ firewall_cfg:
           tcp_ports: "2099,5222-5223,8393-8400"
           udp_ports: "5000-5500,8088,16200-16299"
   
-    netifyd: 
 
     
     #  http_connect:
@@ -140,6 +139,8 @@ firewall_cfg:
     #  https:
     #    mark: cs1
     #    match: { ct_label: HTTP/S }    
+    netifyd: 
+
       http:
         mark: cs1
         match: { ct_label: HTTP }     
