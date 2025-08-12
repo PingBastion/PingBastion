@@ -91,10 +91,59 @@ Firewall behaviour is driven by variables under `group_vars/`.  The main file
 and a list of simple allow/deny rules.  DSCP classes can be defined to mark
 traffic which the CAKE qdisc will then prioritise.
 
-The `first_setup` role also contains tasks to install Pi‑hole either natively or
-through Docker Compose.  Adjust settings such as `pihole_timezone` and
-`pihole_webpassword` in `roles/first_setup/defaults/main.yml` or override them in
-group vars.
+#### Global options — `group_vars/all.yml`
+- `ansible_python_interpreter`: path to Python 3 on the target host.
+- `ansible_shell_executable`: login shell for remote commands.
+- `ndpi_interface`: interface monitored by nDPI.
+- `pihole.adlist`: list of blocklists pulled into Pi-hole.
+
+#### Firewall options — `group_vars/firewalls.yml` (or `rpi4.yml`)
+- `default_user` / `default_user_password`: account created on the host.
+- `pihole_config_dir`: directory holding Pi-hole data.
+- `firewall_cfg.interfaces`: define LAN/WAN NIC names and addressing.
+- `firewall_cfg.dhcp`: DHCP range, gateway and DNS server.
+- `firewall_cfg.nat`: enable or disable masquerading.
+- `firewall_cfg.policy`: default nftables policies.
+- `firewall_cfg.rules`: simple allow/deny rules.
+- `firewall_cfg.dscp_classes`: DSCP markings used by QoS.
+- `firewall_cfg.cake`: bandwidth, RTT and options for CAKE on each interface.
+
+#### Pi-hole variables
+Pi‑hole defaults live in `roles/first_setup/defaults/main.yml` and
+`roles/first_setup/vars/main.yml`.  Override them in `group_vars` to suit your
+setup.  Common options include:
+- `pihole_timezone`
+- `pihole_webpassword`
+- `pihole_dhcp_active`
+- `docker_run_user`
+- `pihole_project_dir`, `pihole_compose_src`, `pihole_toml_src`, `pihole_toml_dest`
+- `docker_package_channel`
+- `ndpi_src_dir`, `xt_ndpi_src` (see `roles/first_setup/vars/main.yml` for
+  `ndpi_version`)
+
+Example override:
+
+```yaml
+# group_vars/all.yml
+pihole:
+  adlist:
+    - https://example.com/blocklist.txt
+  timezone: "UTC"
+  webpassword: "change_me"
+  dhcp_active: true
+```
+
+### QoS setup script
+
+The firewall role installs a rendered `/usr/local/bin/qos-setup.sh` and a
+`qos-restore.service` unit.  The script configures CAKE shaping and DSCP marking.
+It runs on boot but can be invoked manually after changing bandwidth or DSCP
+classes:
+
+```bash
+sudo /usr/local/bin/qos-setup.sh
+sudo systemctl restart qos-restore.service
+```
 
 ### Diagnostics
 
