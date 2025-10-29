@@ -141,7 +141,7 @@ if iptables -V 2>&1 | grep -qi 'nf_tables'; then IPT_BACKEND="nft"; fi
 # Control whether we reload nftables at the very end on success
 # - For iptables-nft backend, reloading at end will wipe iptables chains; default to skip.
 RELOAD_AT_END=${RELOAD_NFT_ON_SUCCESS:-1}
-if [[ "$IPT_BACKEND" == nft ]]; then RELOAD_AT_END={RELOAD_NFT_ON_SUCCESS:-0}; fi
+if [[ "$IPT_BACKEND" == nft ]]; then RELOAD_AT_END=${RELOAD_NFT_ON_SUCCESS:-0}; fi
 
 # ---- Debug: print backend + versions ----
 log "iptables backend: $IPT_BACKEND ; RELOAD_AT_END=$RELOAD_AT_END"

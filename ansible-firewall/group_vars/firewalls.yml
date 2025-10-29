@@ -17,7 +17,7 @@ firewall_cfg:
       cidr: "172.16.0.1/24" #EXAMPLE- USE THE IP/SUBNET COMBO YOU WANT FOR YOUR LAN
 
     wan:
-      nic: &wan_if "enp6s18" #DEFINE HERE THE IFNAME. ALL RNDIS AND CDC ETHERNET DEVICES WILL DEFAULT TO THIS NAME, ALL QOS AND NFTABLES RULES ADJUSTED AUTOMATICALLY
+      nic: &wan_if "usb1" #DEFINE HERE THE IFNAME. ALL RNDIS AND CDC ETHERNET DEVICES WILL DEFAULT TO THIS NAME, ALL QOS AND NFTABLES RULES ADJUSTED AUTOMATICALLY
       method: "dhcp" # DHCP IS USED HERE CAUSE I'M DOING TETHERING/GETTING INTERNET FROM ANOTHER SOURCE/CABLE. EDIT AS NEEDED
   dhcp:
     local_domain: marano.loc
@@ -59,7 +59,22 @@ firewall_cfg:
       to:   wan
       action: accept
       comment: "Permit LAN → WAN forwarding"
+    
+    - chain: forward
+      from: wan
+      to:   lan
+      dst: 45.10.157.100
+      set_dscp: le          # 'le' = Lower Effort (DSCP 1). Use 'cs0' if you want best-effort instead.
+      action: accept
+      comment: "Mark all traffic to 45.10.157.100 with lowest priority (DSCP LE)"
 
+    - chain: forward
+      from: lan
+      to:   wan
+      dst: 45.10.157.100
+      set_dscp: le          # 'le' = Lower Effort (DSCP 1). Use 'cs0' if you want best-effort instead.
+      action: accept
+      comment: "Mark all traffic to 45.10.157.100 with lowest priority (DSCP LE)"
   ##########################################################################
   # 5 ▸ DSCP CLASSES   (high-level notation → nft mangle rules)
   ##########################################################################
@@ -105,7 +120,13 @@ firewall_cfg:
         match:
           tcp_ports: [80]
           upd_ports: [80]
-
+      openvpn:
+        mark: cs0
+        match:
+          tcp_ports: [1194]          
+          udp_ports: [1194]
+          
+  
       
   
       torrent:
